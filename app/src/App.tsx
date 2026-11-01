@@ -2,8 +2,10 @@ import { useGpuix } from "@gpuix/react";
 import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLiveChat } from "./bridge/live";
+import { claimWorkbenchOpen } from "./debug/live";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { Home } from "./home/Home";
+import { adoptLanguage, useLanguage } from "./i18n";
 import { type Chat, useChat } from "./chat/useChat";
 import { type AppItem, type MenuChoice } from "./keys/menus";
 import { runMenuAction } from "./keys/menuActions";
@@ -104,11 +106,17 @@ export function App({ initial }: { readonly initial: Target | null }): ReactElem
   const here = useRef<Screen>(screen);
   here.current = screen;
   const chatting = chat.thread.state.messages.some((message) => message.kind === "user");
-  const { openWorkbench, frost } = useSettings().settings;
+  const { openWorkbench, frost, language } = useSettings().settings;
+  /** Read here so a language switch redraws every screen below. */
+  useLanguage();
   const { renderer } = useGpuix();
+  useEffect(() => adoptLanguage(language), [language]);
   useEffect(() => {
     if (renderer && "setWindowBlurRadius" in renderer && typeof renderer.setWindowBlurRadius === "function") renderer.setWindowBlurRadius(frostRadius(frost));
   }, [renderer, frost]);
+  useEffect(() => {
+    if (process.env.ELEVEN_FRAMES && typeof renderer?.setDebugFrameOverlay === "function") renderer.setDebugFrameOverlay("full");
+  }, [renderer]);
   useEffect(() => {
     if (!target) return;
     if (hasCode(target) && !autoOpens(openWorkbench, chatting)) return;
@@ -118,6 +126,14 @@ export function App({ initial }: { readonly initial: Target | null }): ReactElem
     shown.current = key;
     setScreen({ kind: "workbench", target });
   }, [target?.path, chatting, chat.thread.id, openWorkbench]);
+  useEffect(() => {
+    claimWorkbenchOpen(() => {
+      if (!target || (here.current.kind !== "home" && here.current.kind !== "workbench")) return false;
+      setScreen({ kind: "workbench", target });
+      return true;
+    });
+    return () => claimWorkbenchOpen(null);
+  }, [target?.path]);
   useCommand("open", chat.openFile);
   useCommand("thread", () => {
     chat.thread.reset();

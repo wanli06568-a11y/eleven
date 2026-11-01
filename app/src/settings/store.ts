@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 
 import { z } from "zod";
 
+import { LANGUAGE_SETTINGS, type LanguageSetting } from "../i18n";
 import { COMMAND_IDS } from "../keys/commands";
 import { KEYMAP_IDS, type KeymapId, type Overrides } from "../keys/keymaps";
 import { errorMessage, isRecord } from "../lib/guards";
@@ -50,6 +51,7 @@ export type PathKey = (typeof PATH_KEYS)[number];
 
 export type Settings = {
   readonly defaultAgent: string | null;
+  readonly language: LanguageSetting;
   readonly askBeforeChanges: boolean;
   readonly readWithoutAsking: boolean;
   /** Agent renames, notes, comments and bookmarks wait for review too, not just patches. */
@@ -103,10 +105,12 @@ export type Settings = {
   readonly disabledSkills: readonly string[];
   readonly skillsInComposer: boolean;
   readonly ghidraPseudocode: boolean;
-  readonly ghidraMemory: "Automatic" | "4 GB" | "8 GB" | "16 GB";
+  readonly ghidraMemory: "Automatic" | "2 GB" | "4 GB" | "8 GB" | "16 GB" | "32 GB" | "64 GB";
+  readonly ghidraTimeout: "30 minutes" | "2 hours" | "6 hours" | "12 hours";
   readonly findParameters: boolean;
   readonly rebuildSwitches: boolean;
   readonly hiddenCode: boolean;
+  readonly objcCalls: boolean;
   readonly swiftNames: boolean;
   readonly firstView: "Pseudocode" | "Assembly" | "Graph" | "Hex";
   readonly universalApps: "Ask each time" | "Open the one for this Mac";
@@ -141,6 +145,7 @@ export type Settings = {
 
 export const DEFAULT_SETTINGS: Settings = {
   defaultAgent: null,
+  language: "auto",
   askBeforeChanges: true,
   readWithoutAsking: true,
   reviewAgentEdits: false,
@@ -191,9 +196,11 @@ export const DEFAULT_SETTINGS: Settings = {
   skillsInComposer: true,
   ghidraPseudocode: true,
   ghidraMemory: "Automatic",
+  ghidraTimeout: "30 minutes",
   findParameters: false,
   rebuildSwitches: false,
   hiddenCode: false,
+  objcCalls: false,
   swiftNames: true,
   firstView: "Pseudocode",
   universalApps: "Ask each time",
@@ -248,6 +255,7 @@ const PERMISSIONS: z.ZodType<PermissionTable> = z.object({
 /** Each setting falls back to its default on its own, so one bad value never resets the rest. */
 const SETTINGS: z.ZodType<Settings> = z.object({
   defaultAgent: z.string().nullable().catch(D.defaultAgent),
+  language: z.enum(LANGUAGE_SETTINGS).catch(D.language),
   askBeforeChanges: z.boolean().catch(D.askBeforeChanges),
   readWithoutAsking: z.boolean().catch(D.readWithoutAsking),
   reviewAgentEdits: z.boolean().catch(D.reviewAgentEdits),
@@ -297,10 +305,12 @@ const SETTINGS: z.ZodType<Settings> = z.object({
   disabledSkills: z.array(z.string()).catch([]),
   skillsInComposer: z.boolean().catch(D.skillsInComposer),
   ghidraPseudocode: z.boolean().catch(D.ghidraPseudocode),
-  ghidraMemory: z.enum(["Automatic", "4 GB", "8 GB", "16 GB"]).catch(D.ghidraMemory),
+  ghidraMemory: z.enum(["Automatic", "2 GB", "4 GB", "8 GB", "16 GB", "32 GB", "64 GB"]).catch(D.ghidraMemory),
+  ghidraTimeout: z.enum(["30 minutes", "2 hours", "6 hours", "12 hours"]).catch(D.ghidraTimeout),
   findParameters: z.boolean().catch(D.findParameters),
   rebuildSwitches: z.boolean().catch(D.rebuildSwitches),
   hiddenCode: z.boolean().catch(D.hiddenCode),
+  objcCalls: z.boolean().catch(D.objcCalls),
   swiftNames: z.boolean().catch(D.swiftNames),
   firstView: z.enum(["Pseudocode", "Assembly", "Graph", "Hex"]).catch(D.firstView),
   universalApps: z.enum(["Ask each time", "Open the one for this Mac"]).catch(D.universalApps),

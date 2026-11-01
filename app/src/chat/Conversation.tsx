@@ -3,14 +3,15 @@ import { type ReactElement, type ReactNode, useState } from "react";
 import { toolLabel } from "../agents/describe";
 import type { PlanItem } from "../agents/events";
 import { Tooltip } from "../components/kit";
+import { type PlainId, t } from "../i18n";
 import { seconds, useNow } from "../lib/useNow";
-import { useTheme } from "../theme";
+import { scrollbar, useTheme } from "../theme";
 import { Icon, Row, Spacer } from "../components/ui";
-import { MessageView } from "./MessageView";
-import type { Message, ThreadState } from "./thread";
+import { MessageRow, useRowActions } from "./MessageRow";
+import type { Draft, Message, ThreadState } from "./thread";
 import type { Thread } from "./useThread";
 
-const VERBS = ["Taking it apart", "Reading the code", "Tracing calls", "Following references", "Untangling", "Decompiling"] as const;
+const VERBS: readonly [PlainId, ...PlainId[]] = ["chat.verb.takingApart", "chat.verb.reading", "chat.verb.tracing", "chat.verb.following", "chat.verb.untangling", "chat.verb.decompiling"];
 const VERB_MS = 2400;
 const SHIMMER_MS = 1800;
 const SHIMMER_CHAR_PX = 7.5;
@@ -47,21 +48,21 @@ export function runningTool(messages: readonly Message[]): string | null {
   const last = messages[messages.length - 1];
   if (last?.kind !== "agent") return null;
   const step = [...last.blocks].reverse().find((block) => block.kind === "tool" && block.step.status === "running");
-  return step?.kind === "tool" ? toolLabel(step.step.tool, step.step.input).label : null;
+  return step?.kind === "tool" ? toolLabel(step.step.tool, step.step.input, step.step.summary).label : null;
 }
 
 export function Working({ since, tool }: { readonly since: number; readonly tool: string | null }): ReactElement {
   const { p } = useTheme();
   const now = useNow(true, 33);
   const pulse = Math.floor(now / 600) % 2 === 0;
-  const verb = tool ?? VERBS[Math.floor((now - since) / VERB_MS) % VERBS.length] ?? VERBS[0];
+  const verb = tool ?? t(VERBS[Math.floor((now - since) / VERB_MS) % VERBS.length] ?? VERBS[0]);
   return (
     <Row gap={9} style={{ height: 24 }}>
       <div style={{ display: "flex", opacity: pulse ? 1 : 0.45 }}>
         <Icon name="spark" size={14} color={p.data} />
       </div>
       <Shimmer text={`${verb}…`} color={p.text} now={now} />
-      <div style={{ fontSize: 12, color: p.faint }}>{`${seconds(now - since)} · esc to stop`}</div>
+      <div style={{ fontSize: 12, color: p.faint }}>{t("chat.escToStop", { time: seconds(now - since) })}</div>
     </Row>
   );
 }
@@ -80,7 +81,7 @@ function PlanPanel({ items }: { readonly items: readonly PlanItem[] }): ReactEle
       <Row gap={8} style={{ cursor: "pointer", hover: { opacity: 0.72 } }}>
         <div onClick={() => setOpen(!open)} style={{ display: "flex", alignItems: "center", gap: 8, flexGrow: 1 }}>
           <Icon name="plan" size={14} color={p.text3} />
-          <div style={{ fontSize: 12.5, color: p.text3 }}>{`Plan · ${done} of ${items.length} done`}</div>
+          <div style={{ fontSize: 12.5, color: p.text3 }}>{t("chat.plan", { done, count: items.length })}</div>
           <Spacer />
           <Icon name={open ? "disclosure" : "forward"} size={11} color={p.faint} />
         </div>
@@ -95,18 +96,19 @@ function PlanPanel({ items }: { readonly items: readonly PlanItem[] }): ReactEle
   );
 }
 
-export function QueuePanel({ queue, onRemove }: { readonly queue: readonly string[]; readonly onRemove: (index: number) => void }): ReactElement {
+export function QueuePanel({ queue, onRemove }: { readonly queue: readonly Draft[]; readonly onRemove: (index: number) => void }): ReactElement {
   const { p } = useTheme();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 8, paddingTop: 8, paddingBottom: 6, paddingLeft: 12, paddingRight: 8, borderWidth: 1, borderColor: p.line2, borderRadius: 14, backgroundColor: p.raised }}>
       <Row gap={8} style={{ fontSize: 12, color: p.muted, marginBottom: 2 }}>
         <Icon name="clock" size={13} />
-        <div>{`${queue.length} queued, sends when the agent is done`}</div>
+        <div>{t("chat.queued", { count: queue.length })}</div>
       </Row>
-      {queue.map((text, ix) => (
-        <Row key={`${ix}-${text}`} gap={8} style={{ height: 24, fontSize: 12.5 }}>
-          <div style={{ flexGrow: 1, minWidth: 0, color: p.text2, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>{text}</div>
-          <div onClick={() => onRemove(ix)} aria-label="Remove from queue" style={{ display: "flex", padding: 4, cursor: "pointer", hover: { opacity: 0.72 } }}>
+      {queue.map((draft, ix) => (
+        <Row key={`${ix}-${draft.text}`} gap={8} style={{ height: 24, fontSize: 12.5 }}>
+          <div style={{ flexGrow: 1, minWidth: 0, color: p.text2, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>{draft.text}</div>
+          {draft.attachments.length > 0 && <div style={{ flexShrink: 0, color: p.muted }}>{draft.attachments.length === 1 ? t("chat.oneFile") : t("chat.files", { count: draft.attachments.length })}</div>}
+          <div onClick={() => onRemove(ix)} aria-label={t("chat.removeFromQueue")} style={{ display: "flex", padding: 4, cursor: "pointer", hover: { opacity: 0.72 } }}>
             <Icon name="close" size={11} />
           </div>
         </Row>
@@ -117,17 +119,17 @@ export function QueuePanel({ queue, onRemove }: { readonly queue: readonly strin
 
 function Header({ state, title, agentName, onWorkbench }: { readonly state: ThreadState; readonly title: string; readonly agentName: string; readonly onWorkbench: (() => void) | null }): ReactElement {
   const { p } = useTheme();
-  const status = state.agent.kind === "starting" ? `Starting ${agentName}…` : agentName;
+  const status = state.agent.kind === "starting" ? t("chat.starting", { name: agentName }) : agentName;
   return (
     <Row gap={8} style={{ height: 44, flexShrink: 0, paddingLeft: 16, paddingRight: 14, borderBottomWidth: 1, borderColor: p.fill }}>
       <div style={{ flexShrink: 1, minWidth: 0, fontWeight: 500, color: p.text, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden" }}>{title}</div>
       <div style={{ flexShrink: 0, color: p.muted, whiteSpace: "nowrap" }}>{`· ${status}`}</div>
       <Spacer />
       {onWorkbench && (
-        <Tooltip label="Back to the code view for this file">
+        <Tooltip label={t("chat.backToCode")}>
           <div onClick={onWorkbench} role="button" style={{ display: "flex", alignItems: "center", gap: 6, height: 28, flexShrink: 0, paddingLeft: 10, paddingRight: 10, borderWidth: 1, borderColor: p.sel, borderRadius: 8, color: p.text3, fontSize: 12.5, cursor: "pointer", hover: { opacity: 0.72 } }}>
             <Icon name="expand" size={13} color={p.text3} />
-            <div>Workbench</div>
+            <div>{t("canvas.workbench")}</div>
           </div>
         </Tooltip>
       )}
@@ -143,20 +145,17 @@ export function Conversation({ thread, title, agentName, composer, onWorkbench }
   readonly composer: ReactNode;
   readonly onWorkbench: (() => void) | null;
 }): ReactElement {
+  const { p } = useTheme();
   const { state } = thread;
   const shownAgent = state.agent.kind === "working" || state.agent.kind === "ready" ? state.agent.name || agentName : agentName;
-  const actionsFor = (message: Message, ix: number) => ({
-    onAnswer: (choice: Parameters<Thread["answer"]>[2]) => message.kind === "permission" && thread.answer(ix, message.id, choice),
-    onRetry: thread.retry,
-    onOpen: thread.openFunction,
-  });
+  const actions = useRowActions({ onAnswer: thread.answer, onRetry: thread.retry, onOpen: thread.openFunction, onOpenText: thread.openText });
   return (
     <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, flexBasis: 440, minWidth: 0 }}>
       <Header state={state} title={title} agentName={shownAgent} onWorkbench={onWorkbench} />
-      <virtual-list followTail alignment="top" estimatedItemHeight={80} style={{ flexGrow: 1, minHeight: 0 }}>
+      <virtual-list followTail alignment="top" estimatedItemHeight={80} style={{ ...scrollbar(p), flexGrow: 1, minHeight: 0 }}>
         {state.messages.map((message, ix) => (
           <Centered key={ix} top={ix === 0 ? 22 : 0}>
-            <MessageView message={message} agentName={shownAgent} last={ix === state.messages.length - 1} actions={actionsFor(message, ix)} />
+            <MessageRow message={message} index={ix} agentName={shownAgent} last={ix === state.messages.length - 1} actions={actions} />
           </Centered>
         ))}
         {state.agent.kind === "working" && (

@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "bun --hot src/main.tsx",
     "start": "bun src/main.tsx",
+    "fast": "script/fast",
     "typecheck": "tsc --noEmit",
     "bundle": "script/bundle-macos"
   },
@@ -25,6 +26,6 @@
     "@types/semver": "^7.7",
     "typescript": "^7.0.2"
   },
-  "version": "0.1.9",
+  "version": "0.1.13",
   "license": "Apache-2.0"
 }

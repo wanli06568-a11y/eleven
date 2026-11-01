@@ -1,24 +1,35 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 import { readCachedText } from "../agents/launch";
 import { errorMessage, isRecord, recordField, stringField } from "../lib/guards";
+import { tie } from "../lib/reaper";
 import { SerialQueue } from "../lib/serial";
 import { cacheDir } from "../settings/actions";
 import { currentSettings, pathSetting, type Settings } from "../settings/store";
+import { hasObjcMessages } from "./binaryInfo";
 import { nodeCommand } from "./toolchain";
 import { activeProvider } from "../analysis/engines";
 import type { CodeType } from "./codeTypes";
 
 
-/** Ghidra's first analysis of a real app takes minutes; progress notifications keep the call alive. */
-const CALL_OPTIONS = { timeout: 15 * 60_000, resetTimeoutOnProgress: true } as const;
+const TIME_LIMITS: Readonly<Record<Settings["ghidraTimeout"], number>> = { "30 minutes": 30 * 60_000, "2 hours": 2 * 3_600_000, "6 hours": 6 * 3_600_000, "12 hours": 12 * 3_600_000 };
+const RESPONSE_GRACE_MS = 5 * 60_000;
+const MAX_TIMER_MS = 2_147_483_647 - RESPONSE_GRACE_MS;
 
-/** How long REA lets Ghidra import and analyze a file. REA's own 5.5 minutes is too short for big apps. */
-export const GHIDRA_STARTUP_MS = 30 * 60_000;
+/** How long REA lets Ghidra import and analyze a file: Settings → Analysis, or a valid REA_GHIDRA_STARTUP_TIMEOUT_MS. */
+export function ghidraStartupMs(s: Settings = currentSettings()): number {
+  const override = Number(process.env.REA_GHIDRA_STARTUP_TIMEOUT_MS);
+  return Number.isSafeInteger(override) && override > 0 && override <= MAX_TIMER_MS ? override : TIME_LIMITS[s.ghidraTimeout];
+}
+
+/** Callers wait a little longer than Ghidra's own deadline, so its timeout error reaches them; progress keeps the call alive. */
+export function reaCallOptions(s: Settings = currentSettings()): { readonly timeout: number; readonly resetTimeoutOnProgress: true } {
+  return { timeout: ghidraStartupMs(s) + RESPONSE_GRACE_MS, resetTimeoutOnProgress: true };
+}
 
 const TIMEOUT_CODES: ReadonlySet<string> = new Set(["timeout", "provider_timeout"]);
 
@@ -35,7 +46,7 @@ export type OpenProblem = { readonly raw: string; readonly advice: string };
 export function openProblem(err: unknown): OpenProblem {
   const raw = errorMessage(err);
   if (!(err instanceof ReaError)) return { raw, advice: "Check that REA and Ghidra are installed in Setup, then open it again." };
-  if (TIMEOUT_CODES.has(err.code)) return { raw, advice: "Ghidra ran out of time analyzing it. For a big Swift app, turn off Demangle Swift names in Settings, then open it again." };
+  if (TIMEOUT_CODES.has(err.code)) return { raw, advice: "Ghidra ran out of time analyzing it. Pick a longer Analysis time limit in Settings, restart Eleven and open it again. For a big Swift app, turning off Demangle Swift names also helps." };
   return { raw, advice: "Ghidra couldn't finish reading it. The details below say what stopped it." };
 }
 
@@ -75,27 +86,38 @@ function reportStep(message: string | undefined): void {
   if (step) for (const listener of stepListeners) listener(step);
 }
 
-function plainEnv(): Record<string, string> {
-  return { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), ...reaEnv() };
+function plainEnv(objc: boolean): Record<string, string> {
+  return { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), ...reaEnv(currentSettings(), objc) };
 }
 
-const MAXMEM: Readonly<Record<Settings["ghidraMemory"], string | null>> = { Automatic: null, "4 GB": "4G", "8 GB": "8G", "16 GB": "16G" };
+const MAXMEM: Readonly<Record<Settings["ghidraMemory"], string | null>> = { Automatic: null, "2 GB": "2G", "4 GB": "4G", "8 GB": "8G", "16 GB": "16G", "32 GB": "32G", "64 GB": "64G" };
 
-/** Ghidra knobs from Settings → Analysis, as the environment REA reads when it starts Ghidra. */
-export function reaEnv(s: Settings = currentSettings()): Record<string, string> {
+/** How long Ghidra may decompile one function, so a single huge one can't stall a whole export. */
+const DECOMPILE_SECONDS = 30;
+
+/** Ghidra only has this analyzer for Objective-C Mach-O files, and naming one a file lacks stops the open. */
+const OBJC_MESSAGES = "Objective-C Message Analyzer";
+const OBJC_REFUSED = `Unknown Ghidra analyzer for this program: ${OBJC_MESSAGES}`;
+
+/** Engine knobs from Settings → Analysis, as the environment REA reads when it starts Ghidra or jadx. `objc` says the file has Objective-C messages. */
+export function reaEnv(s: Settings = currentSettings(), objc = false): Record<string, string> {
   const memory = MAXMEM[s.ghidraMemory];
   const inherited = (process.env.REA_GHIDRA_DISABLED_ANALYZERS ?? "").split(",").map((name) => name.trim()).filter(Boolean);
-  const disabled = [...new Set([...inherited, ...(s.rebuildSwitches ? [] : ["Decompiler Switch Analysis"]), ...(s.swiftNames ? [] : ["Demangler Swift"])])];
+  const disabled = [...new Set([...inherited, ...(s.rebuildSwitches ? [] : ["Decompiler Switch Analysis"]), ...(s.swiftNames ? [] : ["Demangler Swift"]), ...(objc && !s.objcCalls ? [OBJC_MESSAGES] : [])])];
+  const analyzed = join(s.cacheDir || cacheDir(), "ghidra-analysis");
   return {
-    REA_GHIDRA_STARTUP_TIMEOUT_MS: process.env.REA_GHIDRA_STARTUP_TIMEOUT_MS ?? String(GHIDRA_STARTUP_MS),
+    REA_GHIDRA_STARTUP_TIMEOUT_MS: String(ghidraStartupMs(s)),
+    REA_JADX_OPERATION_TIMEOUT_MS: String(ghidraStartupMs(s)),
+    REA_GHIDRA_DECOMPILE_TIMEOUT_SECONDS: String(DECOMPILE_SECONDS),
+    ...(isAbsolute(analyzed) ? { REA_GHIDRA_ANALYSIS_CACHE: analyzed } : {}),
     ...(memory ? { GHIDRA_MAXMEM: memory } : {}),
     ...(disabled.length > 0 ? { REA_GHIDRA_DISABLED_ANALYZERS: disabled.join(",") } : {}),
   };
 }
 
-export function reaTransport(): StdioClientTransport {
+export function reaTransport(objc = false): StdioClientTransport {
   const { command, args } = reaLaunch();
-  return new StdioClientTransport({ command, args: [...args], env: plainEnv(), stderr: "ignore" });
+  return new StdioClientTransport({ command, args: [...args], env: plainEnv(objc), stderr: "ignore" });
 }
 
 /** REA's code, the step that failed and the engine's own diagnostics, so a failure says more than its summary. */
@@ -138,28 +160,41 @@ type Session = { readonly path: string; readonly provider: string; readonly open
 
 class Rea {
   private client: Client | null = null;
+  /** Whether the next REA should skip Ghidra's Objective-C analyzer, and whether the running one does: REA reads it only at start. */
+  private objc = false;
+  private clientObjc = false;
   /** Shared by every caller, so concurrent requests on one file import it once instead of once each. */
   private session: Session | null = null;
   private readonly queue = new SerialQueue();
   private readonly replays = new Map<string, () => readonly (readonly [string, CodeType])[]>();
 
   private async connect(): Promise<Client> {
-    if (this.client) return this.client;
+    if (this.client && this.clientObjc === this.objc) return this.client;
+    if (this.client) {
+      const old = this.client;
+      this.client = null;
+      await old.close();
+    }
+    const objc = this.objc;
     const client = new Client({ name: "eleven", version: "0.1.0" });
-    const transport = reaTransport();
+    const transport = reaTransport(objc);
     await client.connect(transport);
+    const untie = tie(transport.pid ?? undefined);
     process.once("exit", () => void transport.close());
     client.onclose = () => {
-      if (this.client === client) this.client = null;
+      untie();
+      if (this.client !== client) return;
+      this.client = null;
       this.session = null;
     };
     this.client = client;
+    this.clientObjc = objc;
     return client;
   }
 
   private call(name: string, args: Record<string, unknown>): Promise<unknown> {
     return this.queue.run(async () => {
-      const result = await (await this.connect()).callTool({ name, arguments: args }, undefined, { ...CALL_OPTIONS, onprogress: ({ message }) => reportStep(message) });
+      const result = await (await this.connect()).callTool({ name, arguments: args }, undefined, { ...reaCallOptions(), onprogress: ({ message }) => reportStep(message) });
       if (result.isError) throw toolError(result.content);
       return result.structuredContent ?? {};
     });
@@ -183,7 +218,20 @@ class Rea {
   }
 
   private async openBinary(path: string, provider: string): Promise<Opened> {
+    this.objc = provider === "ghidra" && !currentSettings().objcCalls && (await hasObjcMessages(path));
+    try {
+      return await this.openAndReplay(path, provider);
+    } catch (err) {
+      if (!this.objc || !errorMessage(err).includes(OBJC_REFUSED)) throw err;
+      this.objc = false;
+      return this.openAndReplay(path, provider);
+    }
+  }
+
+  /** The first query is where Ghidra's import fails, so it runs here, where a refused analyzer can still be retried. */
+  private async openAndReplay(path: string, provider: string): Promise<Opened> {
     const opened = parseOpened(path, await this.call("open_binary", { path, provider_id: provider }));
+    await this.call("list_segments", {});
     for (const [address, type] of this.replays.get(path)?.() ?? []) {
       await this.call("set_code_type", { address, type }).catch(() => undefined);
     }
@@ -231,7 +279,7 @@ class Rea {
     const cached = await readCachedText(file);
     if (cached !== null) return JSON.parse(cached);
     await this.ensureOpen(target.path);
-    const reply = await this.call("analyze_function", { procedure });
+    const reply = await this.call("analyze_function", { procedure, detail: "complete" });
     const value = recordField(recordField(reply, "raw_result"), "value") ?? null;
     if (!value) throw new Error("REA didn't describe this function.");
     await mkdir(dirname(file), { recursive: true });

@@ -7,6 +7,8 @@
 
 <h1 align="center">Eleven</h1>
 
+<p align="center"><a href="https://github.com/reacher-z/Awesome-REA"><img src="https://raw.githubusercontent.com/reacher-z/Awesome-REA/main/assets/featured-by-awesome-rea-inline.svg" alt="Featured by Awesome REA" width="184" height="20"></a></p>
+
 <p align="center">An agent-first reverse-engineering app for macOS, Windows and Linux.</p>
 
 <div align="center">
@@ -44,7 +46,7 @@ Native code is read by [Ghidra](https://ghidra-sre.org) through [REA](https://gi
 
 ## Support Eleven
 
-Eleven is free and built by one person. If it saves you time, [sponsoring on GitHub](https://github.com/sponsors/Zfinix) keeps it going. It pays for notarized builds, a Linux release and the debugger, and you can see what's coming next.
+Eleven is free and built by one person. If it saves you time, [sponsoring on GitHub](https://github.com/sponsors/Zfinix) keeps it going. It pays for signed releases and the debugger, and you can see what's coming next.
 
 ## Install
 
@@ -54,7 +56,7 @@ Eleven is free and built by one person. If it saves you time, [sponsoring on Git
 curl -fsSL https://eleven.chizi.app/install.sh | bash
 ```
 
-This installs `Eleven.app` into `/Applications`. Builds are not notarized yet, so the installer clears the download quarantine for you.
+This installs `Eleven.app` into `/Applications`. The app is signed and notarized by Apple.
 
 **Windows** x64, in PowerShell:
 

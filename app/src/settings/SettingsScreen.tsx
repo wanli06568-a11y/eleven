@@ -6,22 +6,23 @@ import { detectInstalled, type Presence } from "../agents/detect";
 import { resolveLaunch } from "../agents/launch";
 import { activeEngine } from "../analysis/engines";
 import { useAgents } from "../chat/useAgents";
+import { t, thisDevice } from "../i18n";
 import { signedIn } from "../welcome/agentSetup";
 import { Shell } from "../Shell";
-import { useTheme } from "../theme";
+import { scrollbar, useTheme } from "../theme";
 import { copyText, ghidraVersion, latestRelease, rizinVersion } from "./actions";
 import { isNewer } from "../lib/version";
 import { buildPages, type Ctx, rowMatches } from "./catalog";
 import { GroupView, PageHeader, SettingsToast } from "./controls";
 import { AddressPreview, CodePreview, PresetCards, ThemeCards, WindowPreview } from "./extras";
-import { checkAppUpdate, useSettingsInfo } from "./info";
+import { checkAppUpdate, updateShort, useSettingsInfo } from "./info";
 import { KeyboardSection } from "./KeyboardSection";
 import type { GroupModel } from "./model";
 import { Nav } from "./Nav";
 import { KEYBOARD_WORDS, type Page, PAGES, pageIntro, pageTitle } from "./pages";
 import { type Settings, useSettings } from "./store";
 import { appVersion, openLink } from "./system";
-import { OS_NAME, THIS_DEVICE } from "../lib/platform";
+import { OS_NAME } from "../lib/platform";
 
 const TOAST_MS = 2200;
 
@@ -70,18 +71,18 @@ export function SettingsScreen({ initial = "general", onBack, onSetup }: { reado
   const checkApp = async (): Promise<void> => {
     const result = await checkAppUpdate();
     refresh();
-    toast(result.short === "Up to date." ? "Eleven is up to date" : result.short.replace(/\.$/, ""));
+    toast(result.state.kind === "current" ? t("update.elevenCurrent") : updateShort(result).replace(/[.。]$/, ""));
   };
   const checkEngine = async (id: "rizin" | "ghidra"): Promise<void> => {
     const name = id === "rizin" ? "Rizin" : "Ghidra";
     const here = id === "rizin" ? (info.engines.rizin.path ? await rizinVersion(info.engines.rizin.path) : null) : info.engines.ghidra.path ? ghidraVersion(info.engines.ghidra.path) : null;
     const release = await latestRelease(id === "rizin" ? "rizinorg/rizin" : "NationalSecurityAgency/ghidra");
-    if (!release) return toast("Couldn’t reach the update server");
+    if (!release) return toast(t("update.unreachable"));
     if (here && isNewer(release.version, here)) {
       openLink(release.url);
-      return toast(`${name} ${release.version} is out. Opened the download page`);
+      return toast(t("update.engineOut", { name, version: release.version }));
     }
-    toast(`${name} is up to date`);
+    toast(t("update.engineCurrent", { name }));
   };
   const ctx: Ctx = {
     settings: store.settings,
@@ -100,17 +101,17 @@ export function SettingsScreen({ initial = "general", onBack, onSetup }: { reado
     rescan: () => void (async () => {
       const found = await detectInstalled(agents.list);
       setRescanned(found);
-      toast(`Found ${found.size} ${found.size === 1 ? "agent" : "agents"} on ${THIS_DEVICE}`);
+      toast(found.size === 1 ? t("settings.rescan.foundOne", { device: thisDevice() }) : t("settings.rescan.found", { count: found.size, device: thisDevice() }));
     })(),
     install: (id) => void (async () => {
       const agent = agents.list.find((entry) => entry.id === id);
       if (!agent) return;
-      toast(`Getting ${agent.name}…`);
+      toast(t("settings.agent.getting", { name: agent.name }));
       try {
         await resolveLaunch(agent, null);
-        toast(`${agent.name} is ready`);
+        toast(t("settings.agent.ready", { name: agent.name }));
       } catch {
-        toast(`Couldn’t get ${agent.name}. Check your connection and try again`);
+        toast(t("settings.agent.getFailed", { name: agent.name }));
       }
     })(),
     checkApp: () => void checkApp(),
@@ -126,7 +127,7 @@ export function SettingsScreen({ initial = "general", onBack, onSetup }: { reado
         `Debugger: ${info.lldb ? "found" : "not found"}`,
       ].join("\n");
       await copyText(details);
-      toast("Copied to the clipboard");
+      toast(t("settings.copied"));
     })(),
     setup: onSetup,
   };
@@ -136,7 +137,7 @@ export function SettingsScreen({ initial = "general", onBack, onSetup }: { reado
     const rows = group.rows.filter((row) => rowMatches(row, group, pageTitle(id), needle));
     return rows.length > 0 ? [{ page: id, group: { ...group, rows } }] : [];
   }));
-  const shown = (id: Page): boolean => needle === "" || hits.some((hit) => hit.page === id) || (id === "keyboard" ? KEYBOARD_WORDS.includes(needle) : pageTitle(id).toLowerCase().includes(needle));
+  const shown = (id: Page): boolean => needle === "" || hits.some((hit) => hit.page === id) || pageTitle(id).toLowerCase().includes(needle) || (id === "keyboard" && KEYBOARD_WORDS.includes(needle));
   const badges = new Set<Page>([...(activeEngine() === null ? ["engines" as const] : []), ...(installed.size === 0 || agents.list.some((agent) => installed.has(agent.id) && signedIn(agent) === false) ? ["agents" as const] : [])]);
   const open = (next: Page): void => {
     setPage(next);
@@ -148,15 +149,15 @@ export function SettingsScreen({ initial = "general", onBack, onSetup }: { reado
   return (
     <Shell side={<Nav page={page} query={query} shown={shown} badges={badges} onQuery={(next) => { setQuery(next); setConfirm(null); }} onOpen={open} onBack={onBack} />}>
       <div style={{ position: "relative", display: "flex", flexDirection: "column", flexGrow: 1, minHeight: 0 }}>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexGrow: 1, minHeight: 0, overflowY: "scroll", paddingTop: 40, paddingBottom: 56, paddingLeft: 28, paddingRight: 28 }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexGrow: 1, minHeight: 0, overflowY: "scroll", ...scrollbar(p), paddingTop: 40, paddingBottom: 56, paddingLeft: 28, paddingRight: 28 }}>
           <div style={{ display: "flex", flexDirection: "column", width: "100%", maxWidth: 720 }}>
             {needle !== "" ? (
               <>
-                <PageHeader title="Results" intro={`Settings that match “${query.trim()}”.`} />
+                <PageHeader title={t("settings.results")} intro={t("settings.results.intro", { query: query.trim() })} />
                 {hits.map((hit) => (
                   <GroupView key={`${hit.page}:${hit.group.label ?? ""}`} group={hit.group} confirm={confirm} onCancel={cancel} link={{ text: pageTitle(hit.page), go: () => open(hit.page) }} />
                 ))}
-                {hits.length === 0 && <div style={{ color: p.muted }}>{`Nothing matches “${query.trim()}”. Try a word like font, folder, Ghidra or rename.`}</div>}
+                {hits.length === 0 && <div style={{ color: p.muted }}>{t("settings.results.none", { query: query.trim() })}</div>}
               </>
             ) : page === "keyboard" ? (
               <KeyboardSection store={store} />

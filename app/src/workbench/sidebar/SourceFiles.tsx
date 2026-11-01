@@ -9,17 +9,18 @@ import { Icon } from "../../components/ui";
 import type { AgentEntry } from "../../agents/registry";
 import { recreatedFiles, watchRecreated } from "../../engine/recreate";
 import { swiftTypes, type SwiftType } from "../../engine/swiftTypes";
+import { t } from "../../i18n";
 import { errorMessage } from "../../lib/guards";
 import { useLoaded } from "../../lib/useLoaded";
 import { useNow } from "../../lib/useNow";
 import { shellIn } from "../../terminal/shell";
 import { type Palette, useTheme } from "../../theme";
-import { type Arrangement, type ArrangedFile, type ArrangeStep, arrange, type FailReason, failureReason, failureText, forgetArrangement, type Placement, savedArrangement } from "../arrange";
+import { type Arrangement, type ArrangedFile, type ArrangeStep, arrange, type FailReason, failureReason, failureText, forgetArrangement, type Placement, reasonText, savedArrangement } from "../arrange";
 import { type Bench, ELLIPSIS, HOVER, MONO_STYLE, useBench } from "../parts";
 import { type SourceFiles as Files, sourceFiles, traceStatic } from "../sources";
 import { useFolders } from "./memory";
 import { sourceTree } from "./model";
-import { SideSection } from "./parts";
+import { Heading, SECTION_GAP, useSectionOpen } from "./parts";
 import { TreeCaption, TreeFile, TreeFolder, TreeMore } from "./SourceRows";
 
 const GUESSED_SHOWN = 7;
@@ -27,6 +28,7 @@ const UNPLACED_SHOWN = 50;
 const FRAME_MS = 33;
 const NO_TYPES: readonly SwiftType[] = [];
 const NO_FILES: ReadonlySet<string> = new Set();
+const NO_SOURCES: Files = { paths: [], library: [], guessed: [] };
 type State =
   | { readonly kind: "plain" }
   | { readonly kind: "running"; readonly steps: readonly ArrangeStep[]; readonly evidence: Arrangement | null }
@@ -52,11 +54,11 @@ function placementColor(placement: Placement, p: Palette): string {
 function placementLabel(placement: Placement, agent: string): string {
   switch (placement) {
     case "exact":
-      return "From a file path in the binary";
+      return t("workbench.side.placed.exact");
     case "neighbour":
-      return "Placed next to known files";
+      return t("workbench.side.placed.neighbour");
     case "guess":
-      return `Guessed by ${agent}`;
+      return t("workbench.side.placed.guess", { agent });
     default: {
       const unhandled: never = placement;
       return unhandled;
@@ -89,7 +91,6 @@ function useArrangement(files: Files, types: readonly SwiftType[]): { readonly s
           ask: { agent, native: chat.agents.installed.get(agent.id)?.command ?? null, projectId: program.id, binary: { path: program.path } },
           binaryName: program.name,
           functions: program.functions,
-          strings: program.strings,
           types,
           sources: files,
           onStep: (next) => {
@@ -129,16 +130,16 @@ function otherAgents(bench: Bench, x: number, y: number, run: (agent: AgentEntry
   const others = agents.list.filter((agent) => agent.id !== agents.selected.id && agents.installed.has(agent.id));
   openMenu(x, y, others.length
     ? others.map((agent) => ({ kind: "action", label: agent.name, run: () => { bench.chat.pickAgent(agent.id); run(agent); } }))
-    : [{ kind: "action", label: "Add an agent…", icon: "agent", run: () => bench.wb.reveal("agent") }]);
+    : [{ kind: "action", label: t("workbench.side.addAgent"), icon: "agent", run: () => bench.wb.reveal("agent") }]);
 }
 
 function ArrangeButton({ onClick }: { readonly onClick: () => void }): ReactElement {
   const { p } = useTheme();
   return (
-    <Tooltip label="Puts these files in the folders the app was written in. File paths in the binary go first, then the agent places the rest.">
-      <div onClick={onClick} role="button" aria-label="Arrange like the original" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, height: 30, flexShrink: 0, marginTop: 4, marginBottom: 8, borderRadius: 8, backgroundColor: p.fill, fontSize: 12.5, color: p.text, cursor: "pointer", hover: HOVER }}>
+    <Tooltip label={t("workbench.side.arrange.hint")}>
+      <div onClick={onClick} role="button" aria-label={t("workbench.side.arrange")} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, height: 30, flexGrow: 1, flexShrink: 0, marginTop: 4, marginBottom: 8, borderRadius: 8, backgroundColor: p.fill, fontSize: 12.5, color: p.text, cursor: "pointer", hover: HOVER }}>
         <Icon name="spark" size={13} color={p.data} />
-        <div style={{ pointerEvents: "none" }}>Arrange like the original</div>
+        <div style={{ pointerEvents: "none" }}>{t("workbench.side.arrange")}</div>
       </div>
     </Tooltip>
   );
@@ -150,7 +151,7 @@ function Running({ steps }: { readonly steps: readonly ArrangeStep[] }): ReactEl
   const width = `${Math.round((steps.filter((step) => step.done).length / Math.max(steps.length, 1)) * 100)}%`;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, flexShrink: 0, marginTop: 4, marginBottom: 10, padding: 10, borderRadius: 10, backgroundColor: p.well }}>
-      <div style={{ fontSize: 12.5 }}><Shimmer text="Arranging like the original project" color={p.text} now={now} /></div>
+      <div style={{ fontSize: 12.5 }}><Shimmer text={t("workbench.side.arranging")} color={p.text} now={now} /></div>
       {steps.map((step) => (
         <div key={step.label} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: step.done ? p.muted : p.text3 }}>
           <div style={{ display: "flex", justifyContent: "center", width: 14, color: step.done ? p.string : p.text }}>{step.done ? "✓" : "•"}</div>
@@ -196,10 +197,10 @@ function MixBar({ mix, agent }: { readonly mix: Mix; readonly agent: string | nu
         {agent !== null && <div style={{ width: `${mix.guess}%`, backgroundColor: p.data }} />}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", columnGap: 12, rowGap: 4, fontSize: 11.5, color: p.muted }}>
-        <Legend color={p.string} text={`${mix.exact}% from file paths`} />
-        <Legend color={p.link} text={`${mix.neighbour}% placed next to them`} />
-        {agent !== null && mix.guess > 0 && <Legend color={p.data} text={`${mix.guess}% guessed`} />}
-        {mix.unplaced > 0 && <Legend color={p.faint} text={`${mix.unplaced}% not placed`} hollow />}
+        <Legend color={p.string} text={t("workbench.side.mix.exact", { percent: mix.exact })} />
+        <Legend color={p.link} text={t("workbench.side.mix.neighbour", { percent: mix.neighbour })} />
+        {agent !== null && mix.guess > 0 && <Legend color={p.data} text={t("workbench.side.mix.guess", { percent: mix.guess })} />}
+        {mix.unplaced > 0 && <Legend color={p.faint} text={t("workbench.side.mix.unplaced", { percent: mix.unplaced })} hollow />}
       </div>
     </>
   );
@@ -228,11 +229,11 @@ function Done({ arrangement, agent, onUndo, onAgain }: { readonly arrangement: A
   const folders = folderCount(arrangement);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0, marginTop: 4, marginBottom: 8, paddingTop: 8, paddingBottom: 8, paddingLeft: 10, paddingRight: 10, borderRadius: 10, backgroundColor: p.well }}>
-      <div style={{ fontSize: 12, color: p.text3 }}>{`Arranged like the original: ${arrangement.files.length} files in ${folders} ${folders === 1 ? "folder" : "folders"}`}</div>
+      <div style={{ fontSize: 12, color: p.text3 }}>{folders === 1 ? t("workbench.side.arranged.oneFolder", { files: arrangement.files.length }) : t("workbench.side.arranged.folders", { files: arrangement.files.length, folders })}</div>
       <MixBar mix={mixOf(arrangement)} agent={agent} />
       <div style={{ display: "flex", gap: 10 }}>
-        <TextLink label="Back to the plain list" onClick={onUndo} />
-        <TextLink label="Arrange again" onClick={onAgain} />
+        <TextLink label={t("workbench.side.backToPlain")} onClick={onUndo} />
+        <TextLink label={t("workbench.side.arrangeAgain")} onClick={onAgain} />
       </div>
     </div>
   );
@@ -251,14 +252,14 @@ function Partial({ state, onRetry, onSignIn, onOther, onUndo }: {
   const signing = reason === "signin" && !signedIn;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0, marginTop: 4, marginBottom: 8, paddingTop: 8, paddingBottom: 8, paddingLeft: 10, paddingRight: 10, borderRadius: 10, backgroundColor: p.well }}>
-      <div style={{ fontSize: 12, color: p.text3 }}>{`Arranged ${arrangement.files.length} files from the binary`}</div>
+      <div style={{ fontSize: 12, color: p.text3 }}>{t("workbench.side.arranged.partial", { count: arrangement.files.length })}</div>
       <div style={{ fontSize: 11.5, lineHeight: 16, color: p.muted }}>{failureText(reason, agent, left)}</div>
       <MixBar mix={mixOf(arrangement)} agent={null} />
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingTop: 2 }}>
-        <SmallButton label={signing ? "Sign in" : "Try again"} filled onClick={signing ? onSignIn : onRetry} />
-        <SmallButton label="Use another agent" filled={false} onClick={onOther} />
+        <SmallButton label={signing ? t("workbench.side.signIn") : t("workbench.side.tryAgain")} filled onClick={signing ? onSignIn : onRetry} />
+        <SmallButton label={t("workbench.side.otherAgent")} filled={false} onClick={onOther} />
       </div>
-      <TextLink label="Back to the plain list" onClick={onUndo} />
+      <TextLink label={t("workbench.side.backToPlain")} onClick={onUndo} />
     </div>
   );
 }
@@ -269,12 +270,12 @@ function Failed({ message, onRetry }: { readonly message: string; readonly onRet
   const [raw, setRaw] = useState(false);
   return (
     <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0, marginTop: 4, marginBottom: 8, paddingTop: 9, paddingBottom: 9, paddingLeft: 10, paddingRight: 10, borderRadius: 10, borderWidth: 1, borderColor: p.errLine, backgroundColor: p.errBg }}>
-      <div style={{ fontSize: 12, fontWeight: 500, color: p.text }}>Couldn't arrange the files</div>
-      <div style={{ fontSize: 11.5, lineHeight: 16, color: p.text3 }}>{`Eleven couldn’t read the code in ${program.name}. Try again. The list below still works.`}</div>
+      <div style={{ fontSize: 12, fontWeight: 500, color: p.text }}>{t("workbench.side.arrange.failed")}</div>
+      <div style={{ fontSize: 11.5, lineHeight: 16, color: p.text3 }}>{t("workbench.side.arrange.failedDetail", { name: program.name })}</div>
       {raw && <div style={{ marginTop: 2, paddingTop: 6, paddingBottom: 6, paddingLeft: 8, paddingRight: 8, borderRadius: 6, backgroundColor: p.well, fontSize: 11, lineHeight: 15, color: p.muted, userSelect: "text" }}>{message}</div>}
       <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 4 }}>
-        <SmallButton label="Try again" filled onClick={onRetry} />
-        <div onClick={() => setRaw(!raw)} role="button" aria-expanded={raw} style={{ fontSize: 12, color: p.muted, textDecoration: "underline", cursor: "pointer", hover: HOVER }}>{raw ? "Hide details" : "Show details"}</div>
+        <SmallButton label={t("workbench.side.tryAgain")} filled onClick={onRetry} />
+        <div onClick={() => setRaw(!raw)} role="button" aria-expanded={raw} style={{ fontSize: 12, color: p.muted, textDecoration: "underline", cursor: "pointer", hover: HOVER }}>{raw ? t("workbench.side.hideDetails") : t("workbench.side.showDetails")}</div>
       </div>
     </div>
   );
@@ -308,15 +309,15 @@ function useFileRow(): (file: string, name: string, depth: number, ext: string, 
     <TreeFile key={file} name={name} ext={ext} depth={depth} count={opts.count} on={tab?.kind === "source" && tab.file === file} dim={opts.dim ?? false} italic={opts.italic ?? false} recreated={recreated.has(file)} mark={opts.mark ?? null}
       onClick={() => wb.open({ kind: "source", file }, true)}
       menu={() => [
-        { kind: "action", label: "Open", icon: "source", run: () => wb.open({ kind: "source", file }, false) },
-        { kind: "action", label: "Open in split", icon: "split", run: () => wb.openSplit({ kind: "source", file }) },
-        ...(opts.why ? [{ kind: "action" as const, label: "Why it's here", icon: "info", run: () => wb.notify(opts.why ?? "", null) }] : []),
+        { kind: "action", label: t("workbench.side.open"), icon: "source", run: () => wb.open({ kind: "source", file }, false) },
+        { kind: "action", label: t("workbench.side.openInSplit"), icon: "split", run: () => wb.openSplit({ kind: "source", file }) },
+        ...(opts.why ? [{ kind: "action" as const, label: t("workbench.side.why"), icon: "info", run: () => wb.notify(opts.why ?? "", null) }] : []),
       ]} />
   );
 }
 
 /** The paths the binary names, the files guessed from its types, then the Swift library's own files folded away. */
-function PlainList({ files, counts }: { readonly files: Files; readonly counts: ReadonlyMap<string, string> }): ReactElement {
+function usePlainRows(files: Files, counts: ReadonlyMap<string, string>): readonly ReactElement[] {
   const folders = useFolders();
   const fileRow = useFileRow();
   const [more, setMore] = useState(false);
@@ -324,70 +325,89 @@ function PlainList({ files, counts }: { readonly files: Files; readonly counts: 
   const tree = useMemo(() => sourceTree(files.paths, closed), [files, closed]);
   const guessed = more ? files.guessed : files.guessed.slice(0, GUESSED_SHOWN);
   const library = folders.isOpen("src:#library");
-  return (
-    <>
-      {files.paths.length > 0 && <TreeCaption text="From file paths in the binary" first />}
-      {tree.map((node) => node.folder
-        ? <TreeFolder key={node.path} name={node.name} open={!closed.has(node.path)} depth={node.depth} onClick={() => folders.toggle(`src:${node.path}`)} />
-        : fileRow(node.full, node.name, node.depth, node.ext, { count: counts.get(node.full) ?? "" }))}
-      {files.guessed.length > 0 && <TreeCaption text="Guessed from type names" first={files.paths.length === 0} />}
-      {guessed.map((g) => fileRow(g.file, g.file, -1, "swift", { count: counts.get(g.file) ?? "", dim: true }))}
-      {files.guessed.length > GUESSED_SHOWN && <TreeMore label={more ? "Show fewer" : `${files.guessed.length - GUESSED_SHOWN} more`} onClick={() => setMore(!more)} />}
-      {files.library.length > 0 && (
-        <>
-          <TreeCaption text="" first={false} />
-          <TreeFolder name="Swift standard library" open={library} depth={0} count={String(files.library.length)} faint onClick={() => folders.toggle("src:#library")} />
-          {library && files.library.map((path) => fileRow(path, path.split("/").pop() ?? path, 0, "swift", { count: "", dim: true }))}
-        </>
-      )}
-    </>
-  );
+  return [
+    ...(files.paths.length > 0 ? [<TreeCaption key="src:#paths" text={t("workbench.side.fromPaths")} first />] : []),
+    ...tree.map((node) => node.folder
+      ? <TreeFolder key={`src:${node.path}`} name={node.name} open={!closed.has(node.path)} depth={node.depth} onClick={() => folders.toggle(`src:${node.path}`)} />
+      : fileRow(node.full, node.name, node.depth, node.ext, { count: counts.get(node.full) ?? "" })),
+    ...(files.guessed.length > 0 ? [<TreeCaption key="src:#types" text={t("workbench.side.fromTypes")} first={files.paths.length === 0} />] : []),
+    ...guessed.map((g) => fileRow(g.file, g.file, -1, "swift", { count: counts.get(g.file) ?? "", dim: true })),
+    ...(files.guessed.length > GUESSED_SHOWN ? [<TreeMore key="src:#more" label={more ? t("workbench.side.showFewer") : t("workbench.side.more", { count: files.guessed.length - GUESSED_SHOWN })} onClick={() => setMore(!more)} />] : []),
+    ...(files.library.length > 0
+      ? [
+          <TreeCaption key="src:#librarygap" text="" first={false} />,
+          <TreeFolder key="src:#library" name={t("workbench.side.swiftLibrary")} open={library} depth={0} count={String(files.library.length)} faint onClick={() => folders.toggle("src:#library")} />,
+          ...(library ? files.library.map((path) => fileRow(path, path.split("/").pop() ?? path, 0, "swift", { count: "", dim: true })) : []),
+        ]
+      : []),
+  ];
 }
 
 /** The arranged project: folders as the app had them, each file marked by how it got there, then what's left unplaced. */
-function ArrangedTree({ arrangement, agent }: { readonly arrangement: Arrangement; readonly agent: string }): ReactElement {
+function useArrangedRows(arrangement: Arrangement | null, agent: string): readonly ReactElement[] {
   const { p } = useTheme();
   const { openFn, nameOf } = useBench();
   const folders = useFolders();
   const fileRow = useFileRow();
-  const byPath = useMemo(() => new Map(arrangement.files.map((file) => [file.path, file])), [arrangement]);
-  const paths = useMemo(() => arrangement.files.map((file) => file.path), [arrangement]);
+  const files = arrangement?.files;
+  const byPath = useMemo(() => new Map((files ?? []).map((file) => [file.path, file])), [files]);
+  const paths = useMemo(() => (files ?? []).map((file) => file.path), [files]);
   const closed = useMemo(() => closedFolders(paths, folders.isOpen, "arr:"), [paths, folders]);
   const tree = useMemo(() => sourceTree(paths, closed), [paths, closed]);
+  if (!arrangement) return [];
   const unplacedOpen = folders.isOpen("arr:#unplaced");
   const mark = (file: ArrangedFile): ReactElement => {
     const label = placementLabel(file.placement, agent);
     return (
-      <Tooltip label={`${label}. ${file.reason}`}>
+      <Tooltip label={t("workbench.side.placedWhy", { how: label, reason: reasonText(file.reason) })}>
         <div aria-label={label} style={{ width: 6, height: 6, flexShrink: 0, borderRadius: 3, backgroundColor: placementColor(file.placement, p) }} />
       </Tooltip>
     );
   };
-  return (
-    <>
-      {tree.map((node) => {
-        if (node.folder) return <TreeFolder key={node.path} name={node.name} open={!closed.has(node.path)} depth={node.depth} onClick={() => folders.toggle(`arr:${node.path}`)} />;
-        const file = byPath.get(node.full);
-        return file ? fileRow(file.key, node.name, node.depth, node.ext, { count: String(file.fns.length), italic: file.placement === "guess", mark: mark(file), why: `${placementLabel(file.placement, agent)}. ${file.reason}` }) : null;
-      })}
-      {arrangement.unplaced.length > 0 && <TreeFolder name="Not placed" open={unplacedOpen} depth={0} count={arrangement.unplaced.length.toLocaleString()} faint onClick={() => folders.toggle("arr:#unplaced")} />}
-      {unplacedOpen && arrangement.unplaced.slice(0, UNPLACED_SHOWN).map((addr) => (
-        <div key={addr} onClick={() => openFn(addr, true)} role="treeitem" aria-label={`function ${nameOf(addr)}`} style={{ display: "flex", alignItems: "center", gap: 8, height: 24, flexShrink: 0, paddingLeft: 38, paddingRight: 8, borderRadius: 6, cursor: "pointer", hover: HOVER }}>
-          <Icon name="function" size={12} color={p.link} />
-          <div style={{ flexGrow: 1, minWidth: 0, fontSize: 12, color: p.text3, pointerEvents: "none", ...MONO_STYLE, ...ELLIPSIS }}>{nameOf(addr)}</div>
-        </div>
-      ))}
-    </>
-  );
+  return [
+    ...tree.flatMap((node) => {
+      if (node.folder) return [<TreeFolder key={`arr:${node.path}`} name={node.name} open={!closed.has(node.path)} depth={node.depth} onClick={() => folders.toggle(`arr:${node.path}`)} />];
+      const file = byPath.get(node.full);
+      return file ? [fileRow(file.key, node.name, node.depth, node.ext, { count: String(file.fns.length), italic: file.placement === "guess", mark: mark(file), why: t("workbench.side.placedWhy", { how: placementLabel(file.placement, agent), reason: reasonText(file.reason) }) })] : [];
+    }),
+    ...(arrangement.unplaced.length > 0 ? [<TreeFolder key="arr:#unplaced" name={t("workbench.side.notPlaced")} open={unplacedOpen} depth={0} count={arrangement.unplaced.length.toLocaleString()} faint onClick={() => folders.toggle("arr:#unplaced")} />] : []),
+    ...(unplacedOpen ? arrangement.unplaced.slice(0, UNPLACED_SHOWN).map((addr) => (
+      <div key={`arr:fn:${addr}`} onClick={() => openFn(addr, true)} role="treeitem" aria-label={t("workbench.side.functionNamed", { name: nameOf(addr) })} style={{ display: "flex", alignItems: "center", gap: 8, height: 24, flexShrink: 0, paddingLeft: 38, paddingRight: 8, borderRadius: 6, cursor: "pointer", hover: HOVER }}>
+        <Icon name="function" size={12} color={p.link} />
+        <div style={{ flexGrow: 1, minWidth: 0, fontSize: 12, color: p.text3, pointerEvents: "none", ...MONO_STYLE, ...ELLIPSIS }}>{nameOf(addr)}</div>
+      </div>
+    )) : []),
+  ];
 }
 
-/** The files the binary was built from: the paths its compiler left behind, files guessed from its Swift types, or the project as it was arranged. */
-export function SourceFiles(): ReactElement | null {
+function shownArrangement(state: State): Arrangement | null {
+  switch (state.kind) {
+    case "plain":
+    case "failed":
+      return null;
+    case "running":
+      return state.evidence;
+    case "arranged":
+    case "partial":
+      return state.arrangement;
+    default: {
+      const unhandled: never = state;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * The files the binary was built from, as separate side panel items: the heading, a card, then one per tree row,
+ * so the panel's virtual list builds only the rows in view. A large app has thousands of source files.
+ */
+export function useSourceFileItems(on: boolean): readonly ReactElement[] {
   const bench = useBench();
   const { program, chat } = bench;
-  const types = useLoaded(() => swiftTypes(program.path, program.arch), program.id);
+  const { open } = useSectionOpen("source");
+  const types = useLoaded(() => (on ? swiftTypes(program.path, program.arch) : Promise.resolve(NO_TYPES)), `${program.id}:${on}`);
   const swift = types.kind === "ready" ? types.value : NO_TYPES;
-  const files = useMemo(() => sourceFiles(program.strings.map((row) => row.b), swift), [program, swift]);
+  const files = useMemo(() => (on ? sourceFiles(program.strings.map((row) => row.b), swift) : NO_SOURCES), [on, program, swift]);
   const counts = useMemo(() => {
     const count = (file: string, guessed: boolean): string => {
       const n = traceStatic(file, guessed, swift, program.functions, []).fns.length;
@@ -396,30 +416,32 @@ export function SourceFiles(): ReactElement | null {
     return new Map([...files.paths.map((path) => [path, count(path, false)] as const), ...files.guessed.map((g) => [g.file, count(g.file, true)] as const)]);
   }, [files, program, swift]);
   const { state, start, reset, signIn } = useArrangement(files, swift);
+  const agent = state.kind === "partial" ? state.agent : chat.agents.selected.name;
+  const arranged = shownArrangement(state);
+  const plainRows = usePlainRows(files, counts);
+  const arrangedRows = useArrangedRows(arranged, agent);
   const total = files.paths.length + files.guessed.length;
-  if (total + files.library.length === 0) return null;
-  const agent = chat.agents.selected.name;
-  const shown = state.kind === "arranged" || state.kind === "partial" ? state.arrangement.files.length : total;
-  return (
-    <SideSection id="source" title="Source files" count={`${shown} ${shown === 1 ? "file" : "files"}`}>
-      {(() => {
-        switch (state.kind) {
-          case "plain":
-            return <><ArrangeButton onClick={() => start()} /><PlainList files={files} counts={counts} /></>;
-          case "running":
-            return <><Running steps={state.steps} />{state.evidence && <ArrangedTree arrangement={state.evidence} agent={agent} />}</>;
-          case "failed":
-            return <><Failed message={state.message} onRetry={() => start()} /><PlainList files={files} counts={counts} /></>;
-          case "arranged":
-            return <><Done arrangement={state.arrangement} agent={agent} onUndo={reset} onAgain={() => start()} /><ArrangedTree arrangement={state.arrangement} agent={agent} /></>;
-          case "partial":
-            return <><Partial state={state} onRetry={() => start()} onSignIn={signIn} onOther={(x, y) => otherAgents(bench, x, y, start)} onUndo={reset} /><ArrangedTree arrangement={state.arrangement} agent={state.agent} /></>;
-          default: {
-            const unhandled: never = state;
-            return unhandled;
-          }
-        }
-      })()}
-    </SideSection>
-  );
+  if (total + files.library.length === 0) return [];
+  const shown = arranged && state.kind !== "running" ? arranged.files.length : total;
+  const heading = <Heading key="source:heading" id="source" title={t("workbench.side.sourceFiles")} count={shown === 1 ? t("workbench.side.oneFile") : t("workbench.side.files", { count: shown })} />;
+  if (!open) return [heading];
+  const card = ((): ReactElement | null => {
+    switch (state.kind) {
+      case "plain":
+        return <ArrangeButton key="source:card" onClick={() => start()} />;
+      case "running":
+        return <Running key="source:card" steps={state.steps} />;
+      case "failed":
+        return <Failed key="source:card" message={state.message} onRetry={() => start()} />;
+      case "arranged":
+        return <Done key="source:card" arrangement={state.arrangement} agent={agent} onUndo={reset} onAgain={() => start()} />;
+      case "partial":
+        return <Partial key="source:card" state={state} onRetry={() => start()} onSignIn={signIn} onOther={(x, y) => otherAgents(bench, x, y, start)} onUndo={reset} />;
+      default: {
+        const unhandled: never = state;
+        return unhandled;
+      }
+    }
+  })();
+  return [heading, ...(card ? [card] : []), ...(arranged ? arrangedRows : plainRows), <div key="source:end" style={{ height: SECTION_GAP, flexShrink: 0 }} />];
 }

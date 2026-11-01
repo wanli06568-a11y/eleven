@@ -5,6 +5,7 @@ import { type ReactElement, type ReactNode, useEffect, useMemo, useRef, useState
 
 import type { SessionOption } from "../agents/events";
 import type { Target } from "../engine/target";
+import { type PlainId, t } from "../i18n";
 import { MONO, useTheme } from "../theme";
 import { Chip, Icon, MenuSurface, Popover, Row, Spacer, usePopover } from "../components/ui";
 import { loadSkills, skillPrompt } from "../skills/load";
@@ -14,21 +15,29 @@ import { ContextRing } from "./ContextRing";
 import { MentionPicker } from "./MentionPicker";
 import { indexMentions, type Mention, type MentionIndex, startedMention, withMentions } from "./mentions";
 import { flipped, isSwitch, ModelChip, OptionChip } from "./OptionMenu";
+import { isCommand } from "./thread";
 import type { Agents } from "./useAgents";
 import type { Thread } from "./useThread";
 import { noteTyping } from "../lib/shortcuts";
 import { useDropTarget } from "../Shell";
-import { primaryHeld } from "../lib/platform";
+import { join } from "node:path";
+
+import { cacheRoot, choosePath, clipboardFile, primaryHeld } from "../lib/platform";
+import { type Attachment, attachmentFor, canAttach } from "../agents/attachments";
+import { AttachmentChip } from "./Attachments";
 
 export type ComposerPlace = "landing" | "conversation" | "dock";
 
-const PLACEHOLDER: Readonly<Record<ComposerPlace, string>> = {
-  landing: "Ask anything, or drop an app, binary, shader or model here",
-  conversation: "Ask a follow-up, / for skills, @ to mention",
-  dock: "Ask about this code, / for skills, @ to mention",
+const PLACEHOLDER: Readonly<Record<ComposerPlace, PlainId>> = {
+  landing: "composer.placeholder.landing",
+  conversation: "composer.placeholder.conversation",
+  dock: "composer.placeholder.dock",
 };
 
 const NO_MENTIONS = indexMentions([]);
+
+/** One ⌘V can reach the box twice in a row; a second paste inside this window is the same paste. */
+const PASTE_GAP_MS = 500;
 
 function RoundIcon({ icon, size, label, ring = false, onClick }: { readonly icon: string; readonly size: number; readonly label: string; readonly ring?: boolean; readonly onClick: () => void }): ReactElement {
   const { p } = useTheme();
@@ -40,13 +49,49 @@ function RoundIcon({ icon, size, label, ring = false, onClick }: { readonly icon
   );
 }
 
+function AddRow({ icon, label, onPick }: { readonly icon: string; readonly label: string; readonly onPick: () => void }): ReactElement {
+  const { p } = useTheme();
+  return (
+    <div onClick={onPick} role="menuitem" aria-label={label} style={{ display: "flex", alignItems: "center", gap: 8, height: 30, flexShrink: 0, paddingLeft: 8, paddingRight: 8, borderRadius: 6, fontSize: 12.5, color: p.text, cursor: "pointer", hover: { opacity: 0.72 } }}>
+      <Icon name={icon} size={14} color={p.text3} />
+      <div style={{ whiteSpace: "nowrap" }}>{label}</div>
+    </div>
+  );
+}
+
+/** One plus for everything you can bring in: the app or binary to work on, or a file for this message. */
+function AddButton({ ring, onOpenFile, onAttachFile }: { readonly ring: boolean; readonly onOpenFile: () => void; readonly onAttachFile: () => void }): ReactElement {
+  const { p } = useTheme();
+  const menu = usePopover();
+  const box = ring ? 32 : 30;
+  const pick = (run: () => void): void => {
+    menu.close();
+    run();
+  };
+  return (
+    <div onMouseDown={menu.onTriggerDown} style={{ display: "flex", position: "relative", flexShrink: 0 }}>
+      <div onClick={menu.onTriggerClick} role="button" aria-label={t("composer.addFile")} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: box, height: box, borderRadius: box / 2, borderWidth: 1, borderColor: ring ? p.line2 : "transparent", cursor: "pointer", hover: { opacity: 0.72 }, ...(menu.open ? { backgroundColor: p.fill2 } : {}) }}>
+        <Icon name="new" size={ring ? 15 : 16} color={p.text3} />
+      </div>
+      {menu.open && (
+        <Popover side="top" align="start" onDismiss={menu.dismiss}>
+          <MenuSurface width={252}>
+            <AddRow icon="folder" label={t("composer.openFile")} onPick={() => pick(onOpenFile)} />
+            <AddRow icon="attach" label={t("composer.attachFile")} onPick={() => pick(onAttachFile)} />
+          </MenuSurface>
+        </Popover>
+      )}
+    </div>
+  );
+}
+
 function SendButton({ stopping, ready, blocked, large = false, onClick }: { readonly stopping: boolean; readonly ready: boolean; readonly blocked: boolean; readonly large?: boolean; readonly onClick: () => void }): ReactElement {
   const { p } = useTheme();
   const box = large ? 34 : 32;
   const lit = (ready || stopping) && !blocked;
   const look = large ? { backgroundColor: lit ? p.text : p.faint } : { backgroundColor: blocked ? p.faint : p.primary, opacity: lit ? 1 : 0.35 };
   return (
-    <div onClick={() => !blocked && onClick()} aria-label={stopping ? "Stop" : blocked ? "Can't send yet" : "Send"} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: box, height: box, borderRadius: box / 2, flexShrink: 0, ...look, cursor: blocked ? "default" : "pointer", hover: blocked ? {} : { opacity: 0.72 } }}>
+    <div onClick={() => !blocked && onClick()} aria-label={stopping ? t("composer.stop") : blocked ? t("composer.cantSend") : t("composer.send")} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: box, height: box, borderRadius: box / 2, flexShrink: 0, ...look, cursor: blocked ? "default" : "pointer", hover: blocked ? {} : { opacity: 0.72 } }}>
       <Icon name={stopping ? "stop" : "send"} size={stopping ? 12 : 15} color={p.onPrimary} on={stopping} />
     </div>
   );
@@ -54,7 +99,7 @@ function SendButton({ stopping, ready, blocked, large = false, onClick }: { read
 
 function TargetPill({ target, onOpen, onRemove }: { readonly target: Target | null; readonly onOpen: () => void; readonly onRemove: () => void }): ReactElement {
   const { p } = useTheme();
-  if (!target) return <Chip label="No file" caret onClick={onOpen} />;
+  if (!target) return <Chip label={t("composer.noFile")} caret onClick={onOpen} />;
   return (
     <Row gap={6} style={{ height: 30, paddingLeft: 8, paddingRight: 6, fontSize: 12.5, color: p.text3 }}>
       <div onClick={onOpen} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", hover: { opacity: 0.72 } }}>
@@ -62,17 +107,17 @@ function TargetPill({ target, onOpen, onRemove }: { readonly target: Target | nu
         <div style={{ whiteSpace: "nowrap" }}>{target.name}</div>
         <div style={{ whiteSpace: "nowrap", color: p.faint }}>{target.meta}</div>
       </div>
-      <div onClick={onRemove} aria-label={`Remove ${target.name}`} style={{ display: "flex", padding: 3, cursor: "pointer", hover: { opacity: 0.72 } }}>
+      <div onClick={onRemove} aria-label={t("composer.remove", { name: target.name })} style={{ display: "flex", padding: 3, cursor: "pointer", hover: { opacity: 0.72 } }}>
         <Icon name="close" size={11} color={p.faint} />
       </div>
     </Row>
   );
 }
 
-const RUN_CODE: Readonly<Record<PermissionLevel, { readonly word: string; readonly said: string }>> = {
-  Allow: { word: "Auto", said: "Runs code without asking" },
-  Ask: { word: "Ask", said: "Asks before running code" },
-  Never: { word: "Blocked", said: "Can't run code" },
+const RUN_CODE: Readonly<Record<PermissionLevel, { readonly word: PlainId; readonly said: PlainId }>> = {
+  Allow: { word: "composer.runCode.auto", said: "composer.runCode.auto.desc" },
+  Ask: { word: "composer.runCode.ask", said: "composer.runCode.ask.desc" },
+  Never: { word: "composer.runCode.blocked", said: "composer.runCode.blocked.desc" },
 };
 
 function RunCodeRow({ level, on, onPick }: { readonly level: PermissionLevel; readonly on: boolean; readonly onPick: () => void }): ReactElement {
@@ -80,8 +125,8 @@ function RunCodeRow({ level, on, onPick }: { readonly level: PermissionLevel; re
   return (
     <div onClick={onPick} role="menuitemradio" aria-checked={on} style={{ display: "flex", alignItems: "center", gap: 10, height: 44, flexShrink: 0, paddingLeft: 10, paddingRight: 10, borderRadius: 7, cursor: "pointer", hover: { opacity: 0.72 }, ...(on ? { backgroundColor: p.sel } : {}) }}>
       <div style={{ display: "flex", flexDirection: "column", flexGrow: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, color: p.text }}>{RUN_CODE[level].word}</div>
-        <div style={{ fontSize: 11.5, color: p.muted }}>{RUN_CODE[level].said}</div>
+        <div style={{ fontSize: 13, color: p.text }}>{t(RUN_CODE[level].word)}</div>
+        <div style={{ fontSize: 11.5, color: p.muted }}>{t(RUN_CODE[level].said)}</div>
       </div>
       {on && <Icon name="check" size={13} color={p.text} />}
     </div>
@@ -101,16 +146,16 @@ function RunCodePill({ compact }: { readonly compact: boolean }): ReactElement {
   const ring = compact ? {} : { paddingLeft: 12, paddingRight: 12, borderWidth: 1, borderColor: p.line2 };
   return (
     <div onMouseDown={menu.onTriggerDown} style={{ display: "flex", position: "relative", flexShrink: 0 }}>
-      <div onClick={menu.onTriggerClick} role="button" aria-label={`${RUN_CODE[level].said}. Change it`} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, height: compact ? 30 : 32, minWidth: compact ? 30 : 0, borderRadius: 16, fontSize: 12.5, color: p.text3, cursor: "pointer", hover: { opacity: 0.72 }, ...ring, ...(menu.open ? { backgroundColor: p.fill2 } : {}) }}>
+      <div onClick={menu.onTriggerClick} role="button" aria-label={t("composer.runCode.change", { said: t(RUN_CODE[level].said) })} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, height: compact ? 30 : 32, minWidth: compact ? 30 : 0, borderRadius: 16, fontSize: 12.5, color: p.text3, cursor: "pointer", hover: { opacity: 0.72 }, ...ring, ...(menu.open ? { backgroundColor: p.fill2 } : {}) }}>
         <Icon name="asks" size={14} color={p.text3} />
-        {!compact && <div style={{ whiteSpace: "nowrap" }}>{RUN_CODE[level].word}</div>}
+        {!compact && <div style={{ whiteSpace: "nowrap" }}>{t(RUN_CODE[level].word)}</div>}
       </div>
       {menu.open && (
         <Popover side="top" align="start" onDismiss={menu.dismiss}>
           <MenuSurface width={240}>
-            <div style={{ paddingTop: 4, paddingLeft: 10, paddingBottom: 6, fontSize: 11.5, color: p.muted }}>Running code</div>
+            <div style={{ paddingTop: 4, paddingLeft: 10, paddingBottom: 6, fontSize: 11.5, color: p.muted }}>{t("composer.runCode")}</div>
             {PERMISSION_LEVELS.map((option) => <RunCodeRow key={option} level={option} on={option === level} onPick={() => pick(option)} />)}
-            <div onClick={() => { menu.close(); openSettings("permissions"); }} role="button" style={{ display: "flex", alignItems: "center", height: 32, marginTop: 4, paddingLeft: 10, fontSize: 12.5, color: p.muted, cursor: "pointer", hover: { opacity: 0.72 } }}>All permissions…</div>
+            <div onClick={() => { menu.close(); openSettings("permissions"); }} role="button" style={{ display: "flex", alignItems: "center", height: 32, marginTop: 4, paddingLeft: 10, fontSize: 12.5, color: p.muted, cursor: "pointer", hover: { opacity: 0.72 } }}>{t("composer.allPermissions")}</div>
           </MenuSurface>
         </Popover>
       )}
@@ -165,6 +210,8 @@ export function Composer({ place, target, agents, thread, onAttach, onDetach, on
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [mentioning, setMentioning] = useState(false);
   const [picked, setPicked] = useState<readonly Mention[]>([]);
+  const [files, setFiles] = useState<readonly Attachment[]>([]);
+  const lastPaste = useRef(0);
   const box = useRef<PublicInstance>(null);
   const { renderer } = useGpuix();
   const refocus = (): void => queueMicrotask(() => {
@@ -174,15 +221,40 @@ export function Composer({ place, target, agents, thread, onAttach, onDetach, on
   const about = mention && mention !== dropped ? mention : null;
   const skills = useMemo(loadSkills, []);
   const fileOnly = place === "landing" && target !== null && draft.trim().length === 0;
-  const typed = draft.trim().length > 0 || fileOnly;
+  const typed = draft.trim().length > 0 || fileOnly || files.length > 0;
+  const addFiles = (added: readonly Attachment[]): void => {
+    setFiles((current) => [...current, ...added.filter((file) => !current.some((have) => have.path === file.path))]);
+  };
+  const attachFile = async (): Promise<void> => {
+    const path = await choosePath("file", t("composer.attachPrompt"));
+    if (path) addFiles([await attachmentFor(path)]);
+    refocus();
+  };
+  const pasteFile = async (): Promise<void> => {
+    const now = Date.now();
+    if (now - lastPaste.current < PASTE_GAP_MS) return;
+    lastPaste.current = now;
+    const path = await clipboardFile(join(cacheRoot(), "pasted"));
+    if (path) addFiles([await attachmentFor(path)]);
+  };
+  const onFileDrop = async (event: EventPayload): Promise<void> => {
+    const paths = (event.paths ?? []).filter(canAttach);
+    if (paths.length === 0) {
+      drop.onFileDrop?.(event);
+      return;
+    }
+    addFiles(await Promise.all(paths.map(attachmentFor)));
+  };
+  const dropHere = { onFileDrop: (event: EventPayload) => void onFileDrop(event) };
   const stopping = thread.busy && !typed;
   const commandReturn = useSettings().settings.sendKey === "Command Return";
   const submit = (): void => {
     if (!typed || blocked) return;
-    const text = fileOnly && target ? `What does ${target.name} do when it starts?` : draft;
-    thread.send(withMentions(about ? `@${about} ${text}` : text, picked));
+    const text = fileOnly && target ? t("landing.binary", { name: target.name }) : draft.trim() || t("composer.lookAtThis");
+    thread.send(withMentions(about && !isCommand(text) ? `@${about} ${text}` : text, picked), files);
     setDraft("");
     setPicked([]);
+    setFiles([]);
   };
   const onChange = (text: string): void => {
     const before = startedMention(draft, text);
@@ -202,6 +274,7 @@ export function Composer({ place, target, agents, thread, onAttach, onDetach, on
   const onKeyDown = (event: EventPayload): void => {
     noteTyping(event);
     if (event.key === "escape" && thread.busy) thread.stop();
+    if (event.key?.toLowerCase() === "v" && primaryHeld(event.modifiers)) void pasteFile();
     if (commandReturn && event.key === "enter" && primaryHeld(event.modifiers)) submit();
   };
   const pick = (item: PaletteItem): void => {
@@ -258,7 +331,7 @@ export function Composer({ place, target, agents, thread, onAttach, onDetach, on
       )}
       {place !== "landing" && palette}
       {place !== "landing" && picker}
-      <div {...drop} style={{ display: "flex", flexDirection: "column", borderWidth: 1, borderColor: queued ? p.link : thread.busy || (landing && target) ? p.line3 : p.sel, borderRadius: 20, backgroundColor: p.win }}>
+      <div {...dropHere} style={{ display: "flex", flexDirection: "column", borderWidth: 1, borderColor: queued ? p.link : thread.busy || (landing && target) ? p.line3 : p.sel, borderRadius: 20, backgroundColor: p.win }}>
         {slot}
         {landing && target && (
           <Row gap={8} style={{ paddingTop: 12, paddingLeft: 14, paddingRight: 14 }}>
@@ -266,7 +339,7 @@ export function Composer({ place, target, agents, thread, onAttach, onDetach, on
               <Icon name={target.kind} size={16} color={p.muted} />
               <div style={{ whiteSpace: "nowrap", color: p.text }}>{target.name}</div>
               <div style={{ whiteSpace: "nowrap", fontSize: 12, color: p.muted }}>{target.meta}</div>
-              <div onClick={onDetach} role="button" aria-label={`Remove ${target.name}`} style={{ display: "flex", cursor: "pointer", hover: { opacity: 0.72 } }}>
+              <div onClick={onDetach} role="button" aria-label={t("composer.remove", { name: target.name })} style={{ display: "flex", cursor: "pointer", hover: { opacity: 0.72 } }}>
                 <Icon name="close" size={11} color={p.muted} />
               </div>
             </Row>
@@ -274,30 +347,35 @@ export function Composer({ place, target, agents, thread, onAttach, onDetach, on
         )}
         {about && (
           <Row gap={6} style={{ paddingTop: 10, paddingLeft: 14, paddingRight: 14 }}>
-            <div onClick={() => setDropped(about)} role="button" aria-label={`Stop asking about ${about}`} style={{ display: "flex", alignItems: "center", gap: 6, height: 24, paddingLeft: 8, paddingRight: 8, borderRadius: 6, backgroundColor: p.fill2, cursor: "pointer", hover: { opacity: 0.72 } }}>
+            <div onClick={() => setDropped(about)} role="button" aria-label={t("composer.stopAsking", { name: about })} style={{ display: "flex", alignItems: "center", gap: 6, height: 24, paddingLeft: 8, paddingRight: 8, borderRadius: 6, backgroundColor: p.fill2, cursor: "pointer", hover: { opacity: 0.72 } }}>
               <Icon name="function" size={12} color={p.call} />
               <div style={{ fontSize: 11.5, color: p.text3, whiteSpace: "nowrap", fontFamily: MONO }}>{about}</div>
               <Icon name="close" size={8} color={p.faint} />
             </div>
           </Row>
         )}
+        {files.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingTop: 10, paddingLeft: 14, paddingRight: 14 }}>
+            {files.map((file) => <AttachmentChip key={file.path} file={file} onRemove={() => setFiles(files.filter((have) => have.path !== file.path))} />)}
+          </div>
+        )}
         <textarea
-          {...drop}
+          {...dropHere}
           ref={box}
           autoFocus
-          aria-label="Message"
+          aria-label={t("composer.message")}
           value={draft}
           minRows={place === "landing" ? 3 : 1}
           maxRows={12}
-          placeholder={thread.busy ? "Queue another message…" : about ? "Ask about this function, or tell the agent what to find" : (hint ?? PLACEHOLDER[place])}
+          placeholder={thread.busy ? t("composer.queue") : about ? t("composer.aboutFunction") : (hint ?? t(PLACEHOLDER[place]))}
           onChange={(e) => onChange(e.value ?? "")}
           onKeyDown={onKeyDown}
           {...(commandReturn ? {} : { onSubmit: submit })}
           style={{ paddingTop: 14, paddingLeft: 16, paddingRight: 16, paddingBottom: 6, fontSize: place === "landing" ? 15 : 14, color: p.text, backgroundColor: p.win, borderTopLeftRadius: 19, borderTopRightRadius: 19 }}
         />
         <Row gap={landing ? 8 : 4} style={landing ? { paddingTop: 6, paddingLeft: 10, paddingRight: 10, paddingBottom: 10 } : { paddingTop: 4, paddingLeft: 8, paddingRight: 8, paddingBottom: 8 }}>
-          <RoundIcon icon="new" size={landing ? 15 : 16} label="Add a file" ring={landing} onClick={onAttach} />
-          <RoundIcon icon="slash" size={15} label="Modes, skills and files" onClick={() => setPaletteOpen(true)} />
+          <AddButton ring={landing} onOpenFile={onAttach} onAttachFile={() => void attachFile()} />
+          <RoundIcon icon="slash" size={15} label={t("composer.palette")} onClick={() => setPaletteOpen(true)} />
           {landing && !thread.state.options.some((option) => option.category === "mode") && <RunCodePill compact={false} />}
           <Settings thread={thread} pill={landing} compact={place === "dock"} />
           <Spacer />

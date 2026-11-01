@@ -5,10 +5,11 @@ import { join } from "node:path";
 
 import { findOnPath } from "../agents/detect";
 import { pathSetting } from "../settings/store";
+import { listOf, type PlainId, t, thisDevice } from "../i18n";
 import { errorMessage, isRecord } from "../lib/guards";
 import { engineArrived } from "../analysis/engines";
 import { adoptToolchain, enginesDir } from "../engine/toolchain";
-import { OS, THIS_DEVICE, unzip } from "../lib/platform";
+import { OS, unzip } from "../lib/platform";
 import { ghidraHome, javaCheck, jdkHome } from "./checks";
 import { buildDecompiler, hasDecompiler } from "./decompiler";
 import { run, start } from "../lib/process";
@@ -20,8 +21,6 @@ const ADOPTIUM_OS: Readonly<Record<typeof OS, string>> = { mac: "mac", linux: "l
 const TEMURIN = `https://api.adoptium.net/v3/binary/latest/21/ga/${ADOPTIUM_OS[OS]}/${process.arch === "arm64" ? "aarch64" : "x64"}/jdk/hotspot/normal/eclipse`;
 
 export type EngineId = "rizin" | "ghidra" | "java";
-
-export const STOPPED = "The download stopped. Check your connection, then try again.";
 
 /** `repair` is set when the engine is here but a part of it is missing. */
 export type Found = { readonly found: boolean; readonly where: string; readonly repair?: string };
@@ -37,18 +36,22 @@ export type RowState = "ready" | "missing" | "installing" | "failed";
 export type Engine = {
   readonly id: EngineId;
   readonly name: string;
-  readonly tag: string | null;
+  readonly tag: PlainId | null;
   readonly megabytes: number;
-  readonly about: string;
+  readonly about: PlainId;
   readonly logo: string | null;
   readonly needs: readonly EngineId[];
 };
 
 export const ENGINES: readonly Engine[] = [
-  { id: "rizin", name: "Rizin", tag: "Fastest to start", megabytes: 38, about: "Opens most apps in seconds", logo: "rizin.svg", needs: ["rizin"] },
-  { id: "ghidra", name: "Ghidra 12.1", tag: null, megabytes: 512, about: "Slower, with the clearest readable code", logo: "ghidra.png", needs: ["ghidra", "java"] },
-  { id: "java", name: "Java 21", tag: null, megabytes: 196, about: "Ghidra runs on it. Eleven installs its own copy", logo: "java.svg", needs: ["java"] },
+  { id: "rizin", name: "Rizin", tag: "setup.engine.rizin.tag", megabytes: 38, about: "setup.engine.rizin", logo: "rizin.svg", needs: ["rizin"] },
+  { id: "ghidra", name: "Ghidra 12.1", tag: null, megabytes: 512, about: "setup.engine.ghidra", logo: "ghidra.png", needs: ["ghidra", "java"] },
+  { id: "java", name: "Java 21", tag: null, megabytes: 196, about: "setup.engine.java", logo: "java.svg", needs: ["java"] },
 ];
+
+export function engineNames(ids: readonly EngineId[]): string {
+  return listOf(ids.map((id) => engineNamed(id).name));
+}
 
 export function engineNamed(id: EngineId): Engine {
   const engine = ENGINES.find((item) => item.id === id);
@@ -88,7 +91,7 @@ export function detectEngine(id: EngineId): Found {
     case "ghidra": {
       const home = ghidraHome();
       if (!home) return { found: false, where: "" };
-      return hasDecompiler(home) ? { found: true, where: tilde(home) } : { found: false, where: tilde(home), repair: `Found, but its decompiler for ${THIS_DEVICE} is missing. Repair builds it` };
+      return hasDecompiler(home) ? { found: true, where: tilde(home) } : { found: false, where: tilde(home), repair: t("setup.engine.repairNeeded", { device: thisDevice() }) };
     }
     case "java": {
       const home = jdkHome();
@@ -127,7 +130,7 @@ function lastLine(text: string): string | null {
 
 async function brewInstall(id: EngineId, formula: string, note: string): Promise<void> {
   const brew = brewPath();
-  if (!brew) throw new Error("Homebrew is needed for this. Install it from brew.sh, then try again.");
+  if (!brew) throw new Error(t("setup.error.brew"));
   setInstall(id, { phase: "running", progress: null, note });
   const child = start(brew, ["install", formula], { env: { ...process.env, HOMEBREW_NO_AUTO_UPDATE: "1", HOMEBREW_NO_ENV_HINTS: "1" } });
   const watch = (chunk: Buffer): void => {
@@ -141,23 +144,23 @@ async function brewInstall(id: EngineId, formula: string, note: string): Promise
     child.once("error", () => resolve(null));
     child.once("close", resolve);
   });
-  if (code !== 0) throw new Error(STOPPED);
+  if (code !== 0) throw new Error(t("setup.engine.stopped"));
 }
 
 async function ghidraAsset(): Promise<string> {
   const response = await fetch(GHIDRA_RELEASE, { headers: { Accept: "application/vnd.github+json" } });
-  if (!response.ok) throw new Error(STOPPED);
+  if (!response.ok) throw new Error(t("setup.engine.stopped"));
   const release: unknown = await response.json();
   const assets = isRecord(release) && Array.isArray(release.assets) ? release.assets : [];
   for (const asset of assets) {
     if (isRecord(asset) && typeof asset.name === "string" && typeof asset.browser_download_url === "string" && /^ghidra_.*_PUBLIC_.*\.zip$/.test(asset.name)) return asset.browser_download_url;
   }
-  throw new Error("Couldn't find a Ghidra download. Try again later.");
+  throw new Error(t("setup.error.noGhidraDownload"));
 }
 
 async function downloadTo(id: EngineId, url: string, file: string): Promise<void> {
   const response = await fetch(url);
-  if (!response.ok || !response.body) throw new Error(STOPPED);
+  if (!response.ok || !response.body) throw new Error(t("setup.engine.stopped"));
   const total = Number(response.headers.get("content-length")) || 0;
   let received = 0;
   const out = await open(file, "w");
@@ -166,7 +169,7 @@ async function downloadTo(id: EngineId, url: string, file: string): Promise<void
     for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
       await out.write(chunk.value);
       received += chunk.value.length;
-      setInstall(id, { phase: "running", progress: total > 0 ? Math.min(0.99, received / total) : null, note: "Downloading" });
+      setInstall(id, { phase: "running", progress: total > 0 ? Math.min(0.99, received / total) : null, note: t("setup.note.downloading") });
     }
   } finally {
     await out.close();
@@ -178,10 +181,10 @@ async function installJava(): Promise<void> {
   const dir = enginesDir();
   mkdirSync(dir, { recursive: true });
   const file = join(dir, OS === "windows" ? "java-download.zip" : "java-download.tar.gz");
-  setInstall("java", { phase: "running", progress: null, note: "Starting" });
+  setInstall("java", { phase: "running", progress: null, note: t("setup.note.starting") });
   try {
     await downloadTo("java", TEMURIN, file);
-    setInstall("java", { phase: "running", progress: null, note: "Unpacking" });
+    setInstall("java", { phase: "running", progress: null, note: t("setup.note.unpacking") });
     if (OS === "windows") await unzip(file, dir);
     else await run("tar", ["-xzf", file, "-C", dir], { timeout: 300000, maxBuffer: 1 << 24 });
   } finally {
@@ -191,24 +194,24 @@ async function installJava(): Promise<void> {
 
 async function installGhidra(): Promise<void> {
   if (javaCheck().status !== "ok") await startInstall("java");
-  if (javaCheck().status !== "ok") throw new Error("Ghidra needs Java 21, which didn't finish downloading. Check your connection, then try again.");
+  if (javaCheck().status !== "ok") throw new Error(t("setup.error.javaMissing"));
   if (!ghidraHome()) await downloadGhidra();
   const home = ghidraHome();
-  if (!home) throw new Error("Ghidra didn't unpack. Try again.");
+  if (!home) throw new Error(t("setup.error.unpack"));
   if (hasDecompiler(home)) return;
-  setInstall("ghidra", { phase: "running", progress: null, note: `Building the decompiler for ${THIS_DEVICE}` });
+  setInstall("ghidra", { phase: "running", progress: null, note: t("setup.note.building", { device: thisDevice() }) });
   await buildDecompiler(home);
 }
 
 async function downloadGhidra(): Promise<void> {
-  setInstall("ghidra", { phase: "running", progress: null, note: "Finding the latest release" });
+  setInstall("ghidra", { phase: "running", progress: null, note: t("setup.note.finding") });
   const url = await ghidraAsset();
   const dir = enginesDir();
   mkdirSync(dir, { recursive: true });
   const file = join(dir, "ghidra-download.zip");
   try {
     await downloadTo("ghidra", url, file);
-    setInstall("ghidra", { phase: "running", progress: null, note: "Unpacking" });
+    setInstall("ghidra", { phase: "running", progress: null, note: t("setup.note.unpacking") });
     await unzip(file, dir);
   } finally {
     rmSync(file, { force: true });
@@ -218,8 +221,8 @@ async function downloadGhidra(): Promise<void> {
 async function installEngine(id: EngineId): Promise<void> {
   switch (id) {
     case "rizin":
-      if (OS !== "mac") throw new Error("Rizin comes with Eleven. Reinstall Eleven to get it back.");
-      return brewInstall("rizin", "rizin", "Starting");
+      if (OS !== "mac") throw new Error(t("setup.error.rizinBundled"));
+      return brewInstall("rizin", "rizin", t("setup.note.starting"));
     case "ghidra":
       return installGhidra();
     case "java":

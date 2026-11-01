@@ -1,6 +1,8 @@
+import { type PlainId, t } from "../../i18n";
 import type { Fn } from "../model";
+import type { FunctionModule, FunctionModules } from "./functionModules";
 
-export type FnSort = "files" | "address" | "name";
+export type FnSort = "files" | "modules" | "address" | "name";
 
 export type FnShow = "all" | "yours" | "renamed" | "imports";
 
@@ -9,14 +11,14 @@ export type TreeKind = "group" | "folder" | "file" | "class";
 
 export type FnRow =
   | { readonly kind: "node"; readonly path: string; readonly name: string; readonly tree: TreeKind; readonly ext: string; readonly depth: number; readonly count: number; readonly open: boolean }
-  | { readonly kind: "fn"; readonly fn: Fn; readonly label: string; readonly depth: number; readonly where?: string };
+  | { readonly kind: "fn"; readonly fn: Fn; readonly label: string; readonly depth: number; readonly where?: string; readonly module?: FunctionModule };
 
 /** Where a function comes from: the program's own code, or something it was built with. */
 export type Origin = "yours" | "libraries" | "imports" | "runtime";
 
 const ORIGINS: readonly Origin[] = ["yours", "libraries", "imports", "runtime"];
 
-export const ORIGIN_LABEL: Readonly<Record<Origin, string>> = { yours: "Your code", libraries: "Libraries", imports: "Imports", runtime: "Runtime" };
+export const ORIGIN_LABEL: Readonly<Record<Origin, PlainId>> = { yours: "workbench.side.origin.yours", libraries: "workbench.side.origin.libraries", imports: "workbench.side.origin.imports", runtime: "workbench.side.origin.runtime" };
 
 /** Packages that ship inside apps rather than being written for them: Android, Kotlin, Google, Facebook, Square and the usual SDKs. */
 const LIBRARY_PACKAGE = /^(?:android|androidx|kotlin|kotlinx|java|javax|dalvik|sun|j\$|_COROUTINE|com[./](?:google|facebook|squareup|android|fasterxml|bumptech|airbnb|swmansion|th3rdwave|reactnativecommunity)|okhttp3|okio|retrofit2|io[./](?:reactivex|sentry|ktor|grpc|opentelemetry)|rx|dagger|org[./](?:jetbrains|intellij|apache|json|xmlpull|chromium|reactivestreams)|bolts|coil|app[./]notifee|expo|host[./]exp)(?:[./$]|$)/;
@@ -33,9 +35,9 @@ export function originOf(fn: Fn, name: string): Origin {
   return RUNTIME_NAME.test(name) ? "runtime" : "yours";
 }
 
-/** The source file a file row stands for: its tree path without the origin heading (`#yours/`) or the root's leading separator. */
+/** The source file a file row stands for: its tree path without the module or origin heading (`#yours/`) or the root's leading separator. */
 export function rowFile(path: string): string {
-  return path.replace(/^#\w+\//, "").replace(/^\./, "");
+  return path.replace(/^#module\/[^/]+\//, "").replace(/^#\w+\//, "").replace(/^\./, "");
 }
 
 /** A folder starts folded unless it's alone at its level; `flipped` holds the ones the user clicked away from that start. */
@@ -43,11 +45,13 @@ function openAt(path: string, flipped: ReadonlySet<string>, byDefault: boolean):
   return byDefault !== flipped.has(path);
 }
 
-export const SORT_LABEL: Readonly<Record<FnSort, string>> = { files: "By file", address: "By address", name: "A–Z" };
+export const SORT_LABEL: Readonly<Record<FnSort, string>> = { files: "By file", modules: "By module", address: "By address", name: "A–Z" };
 
 export function nextSort(sort: FnSort): FnSort {
   switch (sort) {
     case "files":
+      return "modules";
+    case "modules":
       return "address";
     case "address":
       return "name";
@@ -167,7 +171,7 @@ function treeRows(fns: readonly Fn[], nameOf: (addr: string) => string, flipped:
   if (unnamed.length > 0) {
     const path = `${prefix}/#unnamed`;
     const open = openAt(path, flipped, alone);
-    out.push({ kind: "node", path, name: "Unnamed", tree: "folder", ext: "", depth, count: unnamed.length, open });
+    out.push({ kind: "node", path, name: t("workbench.side.unnamed"), tree: "folder", ext: "", depth, count: unnamed.length, open });
     if (open) for (const fn of [...unnamed].sort((a, b) => (BigInt(a.addr) < BigInt(b.addr) ? -1 : 1))) out.push({ kind: "fn", fn, label: nameOf(fn.addr), depth: depth + 1 });
   }
   return out;
@@ -193,7 +197,7 @@ function fileRows(fns: readonly Fn[], nameOf: (addr: string) => string, flipped:
     const list = byOrigin.get(origin) ?? [];
     const path = `#${origin}`;
     const open = openAt(path, flipped, yoursOpen && origin === "yours");
-    const head: FnRow = { kind: "node", path, name: ORIGIN_LABEL[origin], tree: "group", ext: "", depth: 0, count: list.length, open };
+    const head: FnRow = { kind: "node", path, name: t(ORIGIN_LABEL[origin]), tree: "group", ext: "", depth: 0, count: list.length, open };
     return open ? [head, ...treeRows(list, nameOf, flipped, path, 0, bareBy.get(origin) ?? [])] : [head];
   });
 }
@@ -202,16 +206,60 @@ function fileRows(fns: readonly Fn[], nameOf: (addr: string) => string, flipped:
 function whereOf(fn: Fn, name: string): string {
   const origin = originOf(fn, name);
   const owner = fn.file ? fn.file.replace(/\/[^/]*$/, "").replaceAll("/", ".") : (splitOwner(name)?.owner ?? "");
-  return owner ? `${owner} · ${ORIGIN_LABEL[origin].toLowerCase()}` : ORIGIN_LABEL[origin];
+  const label = t(ORIGIN_LABEL[origin]);
+  return owner ? `${owner} · ${label.toLowerCase()}` : label;
 }
 
-/** The function list as the sidebar draws it: filtered, then as a file tree or sorted flat. */
+const IMPORTS = "Imports";
+const UNMAPPED = "Unmapped";
+
+function moduleOf(fn: Fn, modules: FunctionModules): string {
+  return modules.get(fn.addr)?.name ?? (fn.kind === "thunk" ? IMPORTS : UNMAPPED);
+}
+
+/** A module's heading as shown: the two catch-all groups read in the interface language, real module names as they are. */
+function moduleLabel(name: string): string {
+  if (name === IMPORTS) return t("workbench.side.module.imports");
+  return name === UNMAPPED ? t("workbench.side.module.unmapped") : name;
+}
+
+/** Where a search match lives when grouped by module: the module, whether it's a guess, then its file or owner. */
+function moduleWhere(fn: Fn, name: string, modules: FunctionModules): string {
+  const guessed = modules.get(fn.addr)?.evidence === "layout" ? ` · ${t("workbench.side.guessed")}` : "";
+  const owner = fn.file ?? splitOwner(name)?.owner;
+  return `${moduleLabel(moduleOf(fn, modules))}${guessed}${owner ? ` · ${owner}` : ""}`;
+}
+
+/** One folded heading per module, A to Z with Imports and Unmapped last, each holding the usual file and class tree. */
+function moduleRows(fns: readonly Fn[], nameOf: (addr: string) => string, flipped: ReadonlySet<string>, modules: FunctionModules): readonly FnRow[] {
+  const groups = new Map<string, Fn[]>();
+  for (const fn of fns) {
+    const name = moduleOf(fn, modules);
+    groups.set(name, [...(groups.get(name) ?? []), fn]);
+  }
+  const last = (name: string): number => (name === IMPORTS ? 1 : name === UNMAPPED ? 2 : 0);
+  const ordered = [...groups.entries()].sort(([a], [b]) => last(a) - last(b) || a.localeCompare(b));
+  return ordered.flatMap(([name, list]) => {
+    const path = `#module/${name}`;
+    const open = openAt(path, flipped, false);
+    const head: FnRow = { kind: "node", path, name: moduleLabel(name), tree: "group", ext: "", depth: 0, count: list.length, open };
+    if (!open) return [head];
+    return [head, ...treeRows(list, nameOf, flipped, path, 0).map((row): FnRow => {
+      const module = row.kind === "fn" ? modules.get(row.fn.addr) : undefined;
+      return row.kind === "fn" && module ? { ...row, module } : row;
+    })];
+  });
+}
+
+/** The function list as the sidebar draws it: filtered, then as a file or module tree, or sorted flat. */
 export function functionRows(fns: readonly Fn[], options: {
   readonly nameOf: (addr: string) => string;
   readonly renamed: ReadonlySet<string>;
   readonly query: string;
   readonly show: FnShow;
   readonly sort: FnSort;
+  /** Which module each function belongs to, for grouping by module. */
+  readonly modules?: FunctionModules;
   /** Groups and folders the user clicked away from how they start. */
   readonly flipped: ReadonlySet<string>;
   /** Your code starts open, for a binary with no source files to start from. */
@@ -220,20 +268,25 @@ export function functionRows(fns: readonly Fn[], options: {
   readonly bareFiles?: readonly string[];
 }): readonly FnRow[] {
   const { nameOf, renamed, query, show, sort, flipped, yoursOpen = false, bareFiles = [] } = options;
+  const modules = sort === "modules" ? (options.modules ?? new Map<string, FunctionModule>()) : undefined;
   const needle = query.trim().toLowerCase();
   const shown = fns.filter((fn) => {
     if (show === "renamed" && !renamed.has(fn.addr)) return false;
     if (show === "imports" && fn.kind !== "thunk") return false;
     if (show === "yours" && originOf(fn, nameOf(fn.addr)) !== "yours") return false;
-    return !needle || nameOf(fn.addr).toLowerCase().includes(needle) || fn.addr.includes(needle) || (fn.file?.toLowerCase().includes(needle) ?? false);
+    return !needle || nameOf(fn.addr).toLowerCase().includes(needle) || fn.addr.includes(needle) || (fn.file?.toLowerCase().includes(needle) ?? false) || (modules ? moduleOf(fn, modules).toLowerCase().includes(needle) : false);
   });
   const flat = (list: readonly Fn[]): readonly FnRow[] => list.map((fn) => ({ kind: "fn", fn, label: nameOf(fn.addr), depth: 0 }));
   if (sort === "address") return flat([...shown].sort((a, b) => (BigInt(a.addr) < BigInt(b.addr) ? -1 : 1)));
   if (sort === "name") return flat([...shown].sort(byName(nameOf)));
+  if (needle && modules) {
+    return [...shown].sort((a, b) => moduleOf(a, modules).localeCompare(moduleOf(b, modules)) || byName(nameOf)(a, b)).map((fn) => ({ kind: "fn", fn, label: nameOf(fn.addr), depth: 0, where: moduleWhere(fn, nameOf(fn.addr), modules) }));
+  }
   if (needle) {
     const yoursFirst = (fn: Fn): number => (originOf(fn, nameOf(fn.addr)) === "yours" ? 0 : 1);
     return [...shown].sort((a, b) => yoursFirst(a) - yoursFirst(b) || byName(nameOf)(a, b)).map((fn) => ({ kind: "fn", fn, label: nameOf(fn.addr), depth: 0, where: whereOf(fn, nameOf(fn.addr)) }));
   }
+  if (modules) return moduleRows(shown, nameOf, flipped, modules);
   const bare = show === "all" ? bareFiles : show === "yours" ? bareFiles.filter((file) => !LIBRARY_PACKAGE.test(file)) : [];
   return fileRows(shown, nameOf, flipped, yoursOpen, bare);
 }

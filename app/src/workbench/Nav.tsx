@@ -1,9 +1,10 @@
 import { statSync } from "node:fs";
 
-import { type ReactElement, useEffect, useMemo, useState } from "react";
+import { type ReactElement, useEffect, useLayoutEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "../components/kit";
 import { binaryInfoOf } from "../engine/binaryInfo";
+import { t, useLanguage } from "../i18n";
 import { swiftTypes } from "../engine/swiftTypes";
 import { useListWindow } from "../lib/useListWindow";
 import { useLoaded } from "../lib/useLoaded";
@@ -13,21 +14,27 @@ import { useBench } from "./parts";
 import { ResizeHandle } from "./Resize";
 import { Footer, type FooterMenu } from "./sidebar/Footer";
 import { FnRowView, FunctionsHead, type FnView, MatchNote } from "./sidebar/Functions";
+import { hasFunctionModules, indexFunctionModules } from "./sidebar/functionModules";
 import { FolderContext, type FolderState, loadFolds, saveFolds } from "./sidebar/memory";
 import { functionRows, type FnShow, type FnSort, sourcePaths } from "./sidebar/model";
 import { Faint, useSectionOpen } from "./sidebar/parts";
 import { Blocks, InThisModel, Kernels } from "./sidebar/ModelSections";
 import { Chats, FileViews, YourWork } from "./sidebar/Sections";
-import { SourceFiles } from "./sidebar/SourceFiles";
+import { useSourceFileItems } from "./sidebar/SourceFiles";
 import { Resources } from "./sidebar/Resources";
 import { ProjectSwitcher } from "./sidebar/Top";
 
 const FN_KEY = "fn:";
 
+/** Binaries that register modules start grouped by module; the rest by package or file. */
 function useFnView(): FnView {
-  const [sort, setSort] = useState<FnSort>("files");
+  const { program } = useBench();
+  const modules = useMemo(() => (hasFunctionModules(program.functions) ? indexFunctionModules(program.functions) : null), [program.functions]);
+  const byDefault: FnSort = modules ? "modules" : "files";
+  const [picked, setSort] = useState<FnSort | null>(null);
   const [show, setShow] = useState<FnShow>("all");
-  return { sort, show, setSort, setShow };
+  const sort = picked === "modules" && !modules ? byDefault : (picked ?? byDefault);
+  return { sort, show, byDefault, modules, setSort, setShow };
 }
 
 /** Mach-O files can hold Swift types to name files after; anything else can only have the paths in its strings. */
@@ -60,7 +67,8 @@ function useFolderMemory(hasSources: boolean | null): FolderState & { readonly f
     setReady(false);
     setFlipped(new Set(loadFolds(program.id).flipped));
   }, [program.id]);
-  useEffect(() => {
+  // Before paint, so no frame shows the sections folded the default way and then flips them.
+  useLayoutEffect(() => {
     if (hasSources === null || ready) return;
     const saved = loadFolds(program.id).closed;
     wb.patch({ navClosed: saved ?? (hasSources ? ["functions"] : []) });
@@ -87,30 +95,33 @@ function useFolderMemory(hasSources: boolean | null): FolderState & { readonly f
 function NavList({ view, flipped, hasSources }: { readonly view: FnView; readonly flipped: ReadonlySet<string>; readonly hasSources: boolean | null }): ReactElement {
   const { program, wb, nameOf, chat } = useBench();
   const { open } = useSectionOpen("functions");
+  const language = useLanguage();
   const gpu = chat.target?.kind === "gpu";
   const noCode = chat.target?.kind === "model" || gpu;
   const fnFlipped = useMemo(() => new Set([...flipped].filter((key) => key.startsWith(FN_KEY)).map((key) => key.slice(FN_KEY.length))), [flipped]);
+  const sourceItems = useSourceFileItems(!noCode);
   const query = wb.s.filter.trim();
   const rows = useMemo(
-    () => (open && !noCode ? functionRows(program.functions, { nameOf, renamed: new Set(wb.s.names.keys()), query: wb.s.filter, show: view.show, sort: view.sort, flipped: fnFlipped, yoursOpen: hasSources === false, bareFiles: program.bareFiles ?? [] }) : []),
-    [open, noCode, program, wb.s.names, wb.s.filter, view.show, view.sort, fnFlipped, hasSources],
+    () => (open && !noCode ? functionRows(program.functions, { nameOf, renamed: new Set(wb.s.names.keys()), query: wb.s.filter, show: view.show, sort: view.sort, ...(view.modules ? { modules: view.modules } : {}), flipped: fnFlipped, yoursOpen: hasSources === false, bareFiles: program.bareFiles ?? [] }) : []),
+    [open, noCode, program, wb.s.names, wb.s.filter, view.show, view.sort, view.modules, fnFlipped, hasSources, language],
   );
-  const searching = open && !noCode && query.length > 0 && view.sort === "files";
+  const searching = open && !noCode && query.length > 0 && (view.sort === "files" || view.sort === "modules");
   const firstMatch = rows.find((row) => row.kind === "fn");
   const fixed = noCode
     ? gpu ? [<Chats key="threads" />, <Kernels key="kernels" />] : [<Chats key="threads" />, <InThisModel key="model" />, <Blocks key="blocks" />]
-    : [<Chats key="threads" />, <YourWork key="work" />, <FileViews key="views" />, <SourceFiles key="source" />, <Resources key="resources" />, <FunctionsHead key="functions" view={view} first={firstMatch?.kind === "fn" ? firstMatch.fn.addr : null} />];
+    : [<Chats key="threads" />, <YourWork key="work" />, <FileViews key="views" />, ...sourceItems, <Resources key="resources" />, <FunctionsHead key="functions" view={view} first={firstMatch?.kind === "fn" ? firstMatch.fn.addr : null} />];
   const after = searching
-    ? [<MatchNote key="note" count={rows.length} />]
-    : open && !noCode && rows.length === 0 ? [program.functions.length === 0 ? <Faint key="none" text="Loading functions…" /> : (
+    ? [<MatchNote key="note" count={rows.length} yoursFirst={view.sort === "files"} />]
+    : open && !noCode && rows.length === 0 ? [program.functions.length === 0 ? <Faint key="none" text={t("workbench.side.loadingFunctions")} /> : (
       <div key="none" style={{ display: "flex", flexDirection: "column", paddingTop: 4, paddingBottom: 8 }}>
-        <EmptyState title="Nothing to show here" hint="Try another filter in the menu at the end of the field, or ask the agent to search." />
+        <EmptyState title={t("workbench.side.empty.title")} hint={t("workbench.side.empty.hint")} />
       </div>
     )] : [];
   const total = fixed.length + rows.length + after.length;
   const shown = useListWindow(total);
   const itemAt = (ix: number): ReactElement | undefined => {
-    if (ix < fixed.length) return <div key={`s${ix}`} style={{ display: "flex", flexDirection: "column", width: "100%" }}>{fixed[ix]}</div>;
+    const item = fixed[ix];
+    if (item) return <div key={item.key ?? `s${ix}`} style={{ display: "flex", flexDirection: "column", width: "100%" }}>{item}</div>;
     const row = rows[ix - fixed.length];
     if (row) return <FnRowView key={row.kind === "node" ? `n:${row.path}` : row.fn.addr} row={row} />;
     return after[ix - fixed.length - rows.length];
@@ -135,7 +146,7 @@ export function Nav(): ReactElement {
   return (
     <ThemeContext.Provider value={glass}>
       <FolderContext.Provider value={folders}>
-        <div role="navigation" aria-label="Workspace" style={{ position: "relative", display: "flex", flexDirection: "column", width: wb.s.sizes.sidebar, flexShrink: 0, minHeight: 0, paddingLeft: 10, paddingRight: 10, paddingBottom: 10 }}>
+        <div role="navigation" aria-label={t("workbench.side.workspace")} style={{ position: "relative", display: "flex", flexDirection: "column", width: wb.s.sizes.sidebar, flexShrink: 0, minHeight: 0, paddingLeft: 10, paddingRight: 10, paddingBottom: 10 }}>
           <ResizeHandle edge="sidebar" />
           <ProjectSwitcher />
           <NavList view={view} flipped={folders.flipped} hasSources={hasSources} />
