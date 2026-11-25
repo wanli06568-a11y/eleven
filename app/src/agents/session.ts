@@ -9,8 +9,9 @@ import { type Attachment, promptBlocks } from "./attachments";
 import { AGENT_ENV, BRIDGE_ENV, CHAT_ENV, ELEVEN_SERVER } from "../bridge/protocol";
 import { errorMessage } from "../lib/guards";
 import { toWebReadable, toWebWritable } from "../lib/streams";
-import { currentSettings, loadSettings, pathSetting } from "../settings/store";
+import { currentSettings, loadSettings } from "../settings/store";
 import { isAndroidCode } from "../engine/jadx";
+import { idaRegistration } from "../engine/ida";
 import { reaEnv } from "../engine/rea";
 import type { NativeCommand } from "./detect";
 import type { AgentEvent, PermissionChoice, SessionOption } from "./events";
@@ -31,7 +32,7 @@ type Answer = (choiceId: string | null) => void;
 
 const STDERR_TAIL = 2000;
 const EXIT_GRACE_MS = 400;
-const PASS_THROUGH_ENV = ["GHIDRA_INSTALL_DIR", "JAVA_HOME", "PATH", "HOME", "ELEVEN_REA", "ELEVEN_SUPPORT", "SystemRoot", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT"] as const;
+const PASS_THROUGH_ENV = ["GHIDRA_INSTALL_DIR", "JAVA_HOME", "PATH", "HOME", "ELEVEN_REA", "ELEVEN_NODE", "ELEVEN_SUPPORT", "SystemRoot", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "PATHEXT"] as const;
 
 /** Eleven itself, started with `flag` to serve one of its MCP servers. */
 function selfServer(name: string, flag: string, env: acp.EnvVariable[]): acp.McpServer {
@@ -73,10 +74,10 @@ function envList(value: unknown): acp.EnvVariable[] {
   return Object.entries(value).flatMap(([name, v]) => (typeof v === "string" ? [{ name, value: v }] : []));
 }
 
-/** An IDA MCP server described by a JSON file with `command`, `args` and `env`, as REA's IDA provider reads it. */
+/** An IDA MCP server described by a JSON file with `command`, `args` and `env`, as REA's IDA provider reads it. A URL registration has no command, so agents reach it through REA only. */
 function idaServer(): readonly acp.McpServer[] {
-  const config = pathSetting("idaPath", "REA_IDA_MCP_CONFIG");
-  if (!config?.endsWith(".json")) return [];
+  const config = idaRegistration();
+  if (!config) return [];
   try {
     const parsed: unknown = JSON.parse(readFileSync(config, "utf8"));
     if (typeof parsed !== "object" || parsed === null || !("command" in parsed) || typeof parsed.command !== "string") return [];
@@ -301,7 +302,7 @@ export class AgentSession {
       await this.restoring;
       const { connection, sessionId } = await this.session();
       const result = await connection.prompt({ sessionId, prompt: [{ type: "text", text }, ...(await promptBlocks(attachments, this.prompts))] });
-      this.emit({ kind: "turnEnded", cancelled: result.stopReason === "cancelled" });
+      this.emit({ kind: "turnEnded", cancelled: result.stopReason === "cancelled", refused: result.stopReason === "refusal" });
     } catch (err) {
       await delay(EXIT_GRACE_MS);
       this.fail(`${this.agent.name} stopped: ${errorMessage(err)}`);

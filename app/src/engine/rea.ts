@@ -11,6 +11,7 @@ import { SerialQueue } from "../lib/serial";
 import { cacheDir } from "../settings/actions";
 import { currentSettings, pathSetting, type Settings } from "../settings/store";
 import { hasObjcMessages } from "./binaryInfo";
+import { idaRegistration } from "./ida";
 import { nodeCommand } from "./toolchain";
 import { activeProvider } from "../analysis/engines";
 import type { CodeType } from "./codeTypes";
@@ -51,6 +52,9 @@ export function openProblem(err: unknown): OpenProblem {
 }
 
 export type CodeView = "pseudocode" | "assembly";
+
+/** A project's C types as Ghidra needs them on reopening: every declaration, then each placement with the declaration it places. */
+export type SavedCTypes = { readonly declarations: readonly string[]; readonly placements: readonly (readonly [string, string])[] };
 
 export type Opened = { readonly path: string; readonly sha256: string; readonly format: string; readonly architecture: string };
 
@@ -105,6 +109,7 @@ export function reaEnv(s: Settings = currentSettings(), objc = false): Record<st
   const inherited = (process.env.REA_GHIDRA_DISABLED_ANALYZERS ?? "").split(",").map((name) => name.trim()).filter(Boolean);
   const disabled = [...new Set([...inherited, ...(s.rebuildSwitches ? [] : ["Decompiler Switch Analysis"]), ...(s.swiftNames ? [] : ["Demangler Swift"]), ...(objc && !s.objcCalls ? [OBJC_MESSAGES] : [])])];
   const analyzed = join(s.cacheDir || cacheDir(), "ghidra-analysis");
+  const ida = idaRegistration();
   return {
     REA_GHIDRA_STARTUP_TIMEOUT_MS: String(ghidraStartupMs(s)),
     REA_JADX_OPERATION_TIMEOUT_MS: String(ghidraStartupMs(s)),
@@ -112,6 +117,7 @@ export function reaEnv(s: Settings = currentSettings(), objc = false): Record<st
     ...(isAbsolute(analyzed) ? { REA_GHIDRA_ANALYSIS_CACHE: analyzed } : {}),
     ...(memory ? { GHIDRA_MAXMEM: memory } : {}),
     ...(disabled.length > 0 ? { REA_GHIDRA_DISABLED_ANALYZERS: disabled.join(",") } : {}),
+    ...(ida ? { REA_IDA_MCP_CONFIG: ida } : {}),
   };
 }
 
@@ -167,6 +173,7 @@ class Rea {
   private session: Session | null = null;
   private readonly queue = new SerialQueue();
   private readonly replays = new Map<string, () => readonly (readonly [string, CodeType])[]>();
+  private readonly cReplays = new Map<string, () => SavedCTypes>();
 
   private async connect(): Promise<Client> {
     if (this.client && this.clientObjc === this.objc) return this.client;
@@ -235,12 +242,26 @@ class Rea {
     for (const [address, type] of this.replays.get(path)?.() ?? []) {
       await this.call("set_code_type", { address, type }).catch(() => undefined);
     }
+    const saved = this.cReplays.get(path)?.();
+    for (const declaration of saved?.declarations ?? []) await this.call("define_c_type", { declaration }).catch(() => undefined);
+    for (const [address, declaration] of saved?.placements ?? []) await this.call("define_c_type", { declaration, address }).catch(() => undefined);
     return opened;
   }
 
   /** What to mark again each time Ghidra opens the file, since a fresh session starts from its own analysis. */
   replayOn(path: string, saved: () => readonly (readonly [string, CodeType])[]): void {
     this.replays.set(path, saved);
+  }
+
+  /** The C types to add again each time Ghidra opens the file, and where to place them. */
+  replayCTypesOn(path: string, saved: () => SavedCTypes): void {
+    this.cReplays.set(path, saved);
+  }
+
+  /** Adds a C declaration to the program's types, and reads the bytes at `address` as it when one is given. */
+  async defineCType(path: string, declaration: string, address: string | null): Promise<void> {
+    await this.ensureOpen(path);
+    await this.call("define_c_type", address ? { declaration, address } : { declaration });
   }
 
   /** Marks the bytes at an address as a type, or reads them as code again when `type` is null. */
@@ -273,14 +294,14 @@ class Rea {
     return normalized;
   }
 
-  /** Ghidra's full dossier for one function: blocks, callers, callees, references, comments. Cached as JSON. */
+  /** Ghidra's full dossier for one function: blocks, callers, callees, references, comments. REA 6.8 sends it as the normalized result. Cached as JSON. */
   async analyze(target: Opened, procedure: string): Promise<unknown> {
     const file = join(cacheDir(), target.sha256, "ghidra", "dossier", `${procedure.replace(/[:/]/g, "_")}.json`);
     const cached = await readCachedText(file);
     if (cached !== null) return JSON.parse(cached);
     await this.ensureOpen(target.path);
     const reply = await this.call("analyze_function", { procedure, detail: "complete" });
-    const value = recordField(recordField(reply, "raw_result"), "value") ?? null;
+    const value = recordField(recordField(reply, "raw_result"), "value") ?? recordField(reply, "normalized_result") ?? null;
     if (!value) throw new Error("REA didn't describe this function.");
     await mkdir(dirname(file), { recursive: true });
     await writeFile(file, JSON.stringify(value));

@@ -1,5 +1,5 @@
 
-import { forgetCode, rea, type Opened } from "../engine/rea";
+import { forgetCode, rea, type Opened, type SavedCTypes } from "../engine/rea";
 import { type CodeType, isCodeType } from "../engine/codeTypes";
 import { bundleOf, type Target } from "../engine/target";
 import { type ApkFiles } from "../engine/apk";
@@ -7,16 +7,32 @@ import { bundleFiles } from "../engine/apple";
 import { loadDossier } from "../engine/dossier";
 import { loadProject, projectId } from "../engine/project";
 import { codeUsingString, hexRows, programSegments, programStrings } from "./layout";
+import { parseReaCallPath } from "../engine/callPath";
 import type { Fn, Program, TableRow } from "./model";
 import { forgetProcedures, loadProcedures, type Procedure } from "../engine/procedures";
-import { activeBackend, rizinInstalled } from "../analysis/engines";
+import { activeBackend, activeEngine, rizinInstalled } from "../analysis/engines";
+import { binjaBytes, binjaCode, binjaFunctions, binjaRefs, binjaReplayOn, binjaRetype, binjaSegments, binjaStrings } from "../engine/binja";
 import { isAndroidCode, openJadx } from "../engine/jadx";
-import { rizinBytes, rizinClose, rizinDisassembly, rizinFunctions, rizinHasDecompiler, rizinLightOn, rizinPseudocode, rizinRefs, rizinReplayOn, rizinRetype, rizinSegments, rizinStrings } from "../engine/rizin";
+import { pipeTool, rizinBytes, rizinClose, rizinDisassembly, rizinFunctions, rizinHasDecompiler, rizinLightOn, rizinPseudocode, rizinRefs, rizinReplayOn, rizinRetype, rizinSegments, rizinStrings } from "../engine/rizin";
 
-const RIZIN_HEX_BYTES = 256;
+const HEX_BYTES = 256;
 const CODE_USING_LIMIT = 12;
 
 const LOG_WIDTH = 37;
+
+/** A project's C types for Ghidra to add again on reopening: declarations first, then each placement with its declaration. */
+function savedCTypes(id: string): () => SavedCTypes {
+  return () => {
+    const { ctypes, ctypeAt } = loadProject(id);
+    return {
+      declarations: [...ctypes.values()],
+      placements: [...ctypeAt].flatMap(([addr, name]) => {
+        const declaration = ctypes.get(name);
+        return declaration ? [[addr, declaration] as const] : [];
+      }),
+    };
+  };
+}
 
 /** The types saved in a project, in the order they were set, to mark again when the engine reopens the file. */
 function savedTypes(id: string): () => readonly (readonly [string, CodeType])[] {
@@ -47,17 +63,20 @@ function importRow(procedure: Procedure): TableRow {
 
 const PREVIEW_NOTE = "// Ghidra is still reading this file. Its pseudocode replaces this view when it finishes. Until then, here is the disassembly.";
 const RIZIN_NOTE = "// This engine reads disassembly with no JVM. Right-click a line to have the agent explain or decompile it, or install rz-ghidra for a built-in pseudocode view.";
+const RADARE2_NOTE = "// radare2 reads disassembly with no JVM. Right-click a line to have the agent explain or decompile it, or install r2ghidra (r2pm -ci r2ghidra) for a built-in pseudocode view.";
 
-/** Builds the workbench's view with the native rizin backend: no JVM, disassembly now, pseudocode when a decompiler plugin is present. */
+/** Builds the workbench's view with rizin or radare2 kept running: no JVM, disassembly now, pseudocode when a decompiler plugin is present. */
 async function loadProgramRizin(target: Target, preview = false): Promise<Program> {
   const log: string[] = [];
+  const tool = preview ? "rizin" : pipeTool();
+  const label = tool === "radare2" ? "radare2" : "Rizin";
   const sha256 = projectId(target);
   if (preview) rizinLightOn(target.path);
   rizinReplayOn(target.path, savedTypes(sha256));
   const [functions, strings, segments, resources] = await Promise.all([
-    timed(log, "functions (rizin)", () => rizinFunctions(target.path)),
-    timed(log, "strings (rizin)", () => rizinStrings(target.path)),
-    timed(log, "segments (rizin)", () => rizinSegments(target.path)),
+    timed(log, `functions (${tool})`, () => rizinFunctions(target.path)),
+    timed(log, `strings (${tool})`, () => rizinStrings(target.path)),
+    timed(log, `segments (${tool})`, () => rizinSegments(target.path)),
     timed(log, "app files", () => appFiles(target)),
   ]);
   const hasDecompiler = !preview && (await rizinHasDecompiler(target.path).catch(() => false));
@@ -65,7 +84,7 @@ async function loadProgramRizin(target: Target, preview = false): Promise<Progra
     if (view === "asm") return timed(log, `disassembly ${addr}`, () => rizinDisassembly(target.path, addr));
     if (hasDecompiler) return timed(log, `pseudocode ${addr}`, () => rizinPseudocode(target.path, addr));
     const asm = await timed(log, `disassembly ${addr}`, () => rizinDisassembly(target.path, addr));
-    return `${preview ? PREVIEW_NOTE : RIZIN_NOTE}\n\n${asm}`;
+    return `${preview ? PREVIEW_NOTE : tool === "radare2" ? RADARE2_NOTE : RIZIN_NOTE}\n\n${asm}`;
   };
   return {
     id: sha256,
@@ -78,17 +97,52 @@ async function loadProgramRizin(target: Target, preview = false): Promise<Progra
     strings,
     imports: functions.filter((fn) => fn.kind === "thunk").map((fn) => ({ a: "", b: fn.name })),
     segments,
-    evidence: `${sha256.slice(0, 8)}… · Rizin`,
-    engine: "Rizin",
+    evidence: `${sha256.slice(0, 8)}… · ${label}`,
+    engine: label,
     ...(preview ? { preview } : {}),
     ...(resources ? { resources } : {}),
     log: () => log,
     code,
     refs: (addr) => timed(log, `xrefs ${addr}`, () => rizinRefs(target.path, addr)),
     dossier: null,
-    hex: (addr) => rizinBytes(target.path, addr, RIZIN_HEX_BYTES),
+    hex: (addr) => rizinBytes(target.path, addr, HEX_BYTES),
     focusLine: () => -1,
     retype: preview ? null : (addr, next, previous) => rizinRetype(target.path, addr, next, previous),
+  };
+}
+
+/** Builds the workbench's view with Binary Ninja's headless API: its functions, sections, disassembly and high level IL. */
+async function loadProgramBinja(target: Target): Promise<Program> {
+  const log: string[] = [];
+  const sha256 = projectId(target);
+  binjaReplayOn(target.path, savedTypes(sha256));
+  const functions = await timed(log, "functions (Binary Ninja)", () => binjaFunctions(target.path));
+  const [strings, segments, resources] = await Promise.all([
+    timed(log, "strings (Binary Ninja)", () => binjaStrings(target.path)),
+    timed(log, "sections (Binary Ninja)", () => binjaSegments(target.path)),
+    timed(log, "app files", () => appFiles(target)),
+  ]);
+  return {
+    id: sha256,
+    path: target.path,
+    origin: target.original,
+    name: target.name,
+    arch: target.arch,
+    total: functions.length,
+    functions,
+    strings,
+    imports: functions.filter((fn) => fn.kind === "thunk").map((fn) => ({ a: "", b: fn.name })),
+    segments,
+    evidence: `${sha256.slice(0, 8)}… · Binary Ninja`,
+    engine: "Binary Ninja",
+    ...(resources ? { resources } : {}),
+    log: () => log,
+    code: (addr, view) => timed(log, `${view === "pseudo" ? "hlil" : "disassembly"} ${addr}`, () => binjaCode(target.path, addr, view)),
+    refs: (addr) => timed(log, `xrefs ${addr}`, () => binjaRefs(target.path, addr)),
+    dossier: null,
+    hex: (addr) => binjaBytes(target.path, addr, HEX_BYTES),
+    focusLine: () => -1,
+    retype: (addr, next, previous) => binjaRetype(target.path, addr, next, previous),
   };
 }
 
@@ -129,6 +183,7 @@ async function loadProgramRea(target: Target): Promise<Program> {
   const sha256 = projectId(target);
   const opened: Opened = { path: target.path, sha256, format: "", architecture: target.arch };
   rea.replayOn(target.path, savedTypes(sha256));
+  rea.replayCTypesOn(target.path, savedCTypes(sha256));
   const procedures = await timed(log, "list_procedures", () => loadProcedures(target.path, sha256));
   const functions: readonly Fn[] = procedures
     .filter((p) => p.kind !== "External")
@@ -155,7 +210,7 @@ async function loadProgramRea(target: Target): Promise<Program> {
     imports: procedures.filter((p) => p.kind === "External").map(importRow),
     segments,
     evidence: `${sha256.slice(0, 8)}…`,
-    engine: "Ghidra",
+    engine: activeEngine()?.name ?? "Ghidra",
     ...(resources ? { resources } : {}),
     log: () => log,
     code,
@@ -165,6 +220,11 @@ async function loadProgramRea(target: Target): Promise<Program> {
     },
     dossier: (addr) => loadDossier(opened, addr),
     codeUsing: (addr) => timed(log, `xrefs ${addr}`, () => codeUsingString(target.path, addr, CODE_USING_LIMIT)),
+    defineCType: async (declaration, at) => {
+      await timed(log, `define_c_type${at ? ` ${at}` : ""}`, () => rea.defineCType(target.path, declaration, at));
+      await forgetCode(sha256);
+    },
+    callPath: async (from, to) => parseReaCallPath(await timed(log, `trace_call_path ${from} ${to}`, () => rea.tool(target.path, "trace_call_path", { start: from, goal: to, direction: "forward" }))),
     hex: (addr) => hexRows(target.path, addr),
     focusLine: () => -1,
     retype: async (addr, next) => {
@@ -179,7 +239,8 @@ type Reader = { readonly accepts: (target: Target) => boolean; readonly load: (t
 
 const READERS: readonly Reader[] = [
   { accepts: (target) => isAndroidCode(target.path), load: loadProgramJadx },
-  { accepts: () => activeBackend() === "rizin", load: loadProgramRizin },
+  { accepts: () => activeBackend() === "pipe", load: (target) => loadProgramRizin(target) },
+  { accepts: () => activeBackend() === "binja", load: loadProgramBinja },
   { accepts: () => true, load: loadProgramRea },
 ];
 
@@ -193,7 +254,7 @@ export function loadProgram(target: Target): Promise<Program> {
 export type ProgramOpening = { readonly first: Promise<Program>; readonly full: Promise<Program> };
 
 function previewFits(target: Target): boolean {
-  return activeBackend() !== "rizin" && !isAndroidCode(target.path) && rizinInstalled();
+  return activeBackend() === "rea" && !isAndroidCode(target.path) && rizinInstalled();
 }
 
 async function settled(full: Promise<Program>, path: string): Promise<void> {

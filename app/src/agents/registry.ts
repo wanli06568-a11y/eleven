@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { errorMessage, isRecord, recordField, stringField } from "../lib/guards";
 import { cacheRoot } from "../lib/platform";
+import { keepsToThisMac } from "../lib/private";
 
 const REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const CACHE_DIR = join(cacheRoot(), "agents");
@@ -54,6 +55,14 @@ export function customAgentEntry(command: string): AgentEntry | null {
 /** Agents Eleven knows about that aren't in the public registry. */
 const LOCAL_AGENTS: readonly AgentEntry[] = [
   {
+    id: "commandcode",
+    name: "Command Code",
+    description: "Your local Command Code agent",
+    version: "local",
+    iconUrl: null,
+    distribution: { kind: "command", command: "commandcode", args: ["acp"] },
+  },
+  {
     id: "aster",
     name: "Aster",
     description: "Your local Aster agent",
@@ -66,7 +75,7 @@ const LOCAL_AGENTS: readonly AgentEntry[] = [
 export const DEFAULT_AGENT_ID = "claude-acp";
 
 /** The order agents appear in the picker; everything else follows alphabetically. */
-const FEATURED = ["claude-acp", "codex-acp", "grok-build", "antigravity-acp", "gemini", "github-copilot-cli", "cursor", "goose", "opencode", "aster"] as const;
+const FEATURED = ["claude-acp", "codex-acp", "grok-build", "antigravity-acp", "gemini", "github-copilot-cli", "cursor", "goose", "opencode", "commandcode", "aster"] as const;
 
 export function platformKey(): string {
   const os = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "windows" : "linux";
@@ -169,7 +178,7 @@ async function cached(): Promise<unknown> {
 export async function loadAgents(): Promise<readonly AgentEntry[]> {
   let json: unknown = null;
   try {
-    json = (await isFresh(REGISTRY_FILE)) ? await cached() : await download();
+    json = keepsToThisMac() || (await isFresh(REGISTRY_FILE)) ? await cached() : await download();
   } catch (err) {
     console.warn(`eleven: using the cached agent list (${errorMessage(err)})`);
     json = await cached();
